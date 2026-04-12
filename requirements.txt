@@ -1,0 +1,8 @@
+azure-ai-textanalytics
+azure-core
+azure-cosmos
+pandas
+plotly
+python-dotenv
+requests
+streamlit
