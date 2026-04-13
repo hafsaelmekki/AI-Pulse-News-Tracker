@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import requests
 
 from .config import Settings
@@ -15,7 +15,7 @@ class NewsClient:
         self._settings = settings
         self._session = session or requests.Session()
 
-    def fetch_articles(self, query: str | None = None) -> list[Article]:
+    def fetch_articles(self, query: str | None = None, after: datetime | None = None) -> list[Article]:
         params = {
             "q": query or self._settings.news_query,
             "language": self._settings.news_language,
@@ -23,6 +23,8 @@ class NewsClient:
             "apiKey": self._settings.news_api_key,
             "sortBy": "publishedAt",
         }
+        if after:
+            params["from"] = _format_from_param(after)
         response = self._session.get(
             "https://newsapi.org/v2/everything",
             params=params,
@@ -62,3 +64,11 @@ def _parse_date(value: str) -> datetime:
     except ValueError:
         LOGGER.warning("Unable to parse date '%s', defaulting to now", value)
         return datetime.utcnow()
+
+
+def _format_from_param(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    value = value.astimezone(timezone.utc) + timedelta(seconds=1)
+    value = value.replace(microsecond=0)
+    return value.isoformat().replace("+00:00", "Z")

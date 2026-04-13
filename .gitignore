@@ -5,6 +5,7 @@ venv/
 !.env.example
 __pycache__/
 *.py[cod]
+*.egg-info/
 *.log
 .pytest_cache/
 .mypy_cache/

@@ -7,21 +7,44 @@ import plotly.express as px
 import streamlit as st
 
 from .config import load_settings
+from .models import UpsertResult
 from .pipeline import NewsAnalyzerPipeline
 
 st.set_page_config(page_title="AI Pulse Tracker", layout="wide")
+PIPELINE_RESOURCE_KEY = "pipeline-v2"
 
 
 @st.cache_resource(show_spinner=False)
-def get_pipeline() -> NewsAnalyzerPipeline:
+def get_pipeline(_cache_buster: str) -> NewsAnalyzerPipeline:
     settings = load_settings()
     return NewsAnalyzerPipeline(settings)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_dataframe() -> pd.DataFrame:
-    rows = get_pipeline().load_dashboard_rows()
+    rows = get_pipeline(PIPELINE_RESOURCE_KEY).load_dashboard_rows()
     return pd.DataFrame(rows)
+
+
+def _ensure_upsert_result(result: UpsertResult | list[str]) -> UpsertResult:
+    if isinstance(result, UpsertResult):
+        return result
+    return UpsertResult(ids=list(result), created=len(result), updated=0)
+
+
+def _parse_since_text(value: str) -> datetime | None:
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        st.sidebar.error("Invalid ISO8601 datetime. Example: 2024-04-02T09:30:00Z")
+        return None
 
 
 def render_dashboard() -> None:
@@ -34,21 +57,33 @@ def render_dashboard() -> None:
         placeholder="Generative AI",
         help="Leave empty to use the default configured query.",
     )
+    since_text = st.sidebar.text_input(
+        "Fetch articles published after (ISO8601)",
+        placeholder="2024-04-01T08:00:00Z",
+    )
+    full_refresh = st.sidebar.checkbox(
+        "Ignore incremental cursor", help="Refetch even if articles already ingested."
+    )
     refresh_clicked = st.sidebar.button("Refresh data cache", key="refresh-cache")
     fetch_clicked = st.sidebar.button(
         "Ingest latest articles", type="primary", key="fetch-latest"
     )
 
     status_message: str | None = None
+    since_override = _parse_since_text(since_text)
+
     if fetch_clicked:
         with st.spinner("Contacting NewsAPI + Azure AI..."):
-            inserted_ids = get_pipeline().run(
+            raw_result = get_pipeline(PIPELINE_RESOURCE_KEY).run(
                 query=query_override or None,
+                after=since_override,
+                incremental=not full_refresh and since_override is None,
             )
+        result = _ensure_upsert_result(raw_result)
         load_dataframe.clear()
         status_message = (
-            f"Ingested {len(inserted_ids)} articles at "
-            f"{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}."
+            f"Ingested {result.created} new / {result.updated} refreshed "
+            f"at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}."
         )
     elif refresh_clicked:
         load_dataframe.clear()
@@ -60,6 +95,9 @@ def render_dashboard() -> None:
     if df.empty:
         st.warning("No documents found in Cosmos DB. Run the ingestion pipeline first.")
         return
+
+    if "source_name" in df.columns:
+        df["source"] = df["source_name"].fillna(df["source"])
 
     df["pos_score"] = df["confidence"].apply(lambda row: row["pos"])  # type: ignore[index]
     df["neu_score"] = df["confidence"].apply(lambda row: row["neu"])  # type: ignore[index]

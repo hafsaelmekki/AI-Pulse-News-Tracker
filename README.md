@@ -5,7 +5,7 @@ AI Pulse News Tracker ingests the latest AI-related articles from NewsAPI, score
 ## Features
 - French-language AI news ingestion via NewsAPI (batch size configurable through environment variables).
 - Azure Text Analytics sentiment scoring with confidence values retained per article.
-- Cosmos DB persistence with automatic database/container provisioning.
+- Cosmos DB persistence with automatic database/container provisioning and article `id` set to the source URL so re-ingests update in place.
 - Streamlit dashboard showing KPIs, plots, and a latest-articles table backed by the Cosmos data.
 
 ## Project Layout
@@ -47,6 +47,7 @@ Fetch and analyze the newest AI stories (optionally override the query term):
 ```bash
 python news_analyzer.py --query "Generative AI"
 ```
+- Need to reprocess older coverage? Append `--full-refresh` to ignore the incremental cursor or pass `--since 2024-04-01T00:00:00Z` to re-fetch articles after a specific timestamp.
 
 ### Launch the dashboard
 ```bash
@@ -57,6 +58,9 @@ The Streamlit script loads the Cosmos DB container and visualizes article counts
 ## Real-time Tracking
 - **Continuous ingestion:** run `python news_analyzer.py --interval 120` to pull/analyze news every two minutes (Ctrl+C to stop). The CLI enforces a 30-second minimum cadence to protect the upstream APIs.
 - **On-demand ingestion:** inside the Streamlit app, use the sidebar "Ingest latest articles" button to trigger a fresh NewsAPI pull + Azure analysis and refresh the dashboard cache immediately.
+- The sidebar also exposes optional fields to supply an ISO datetime (to re-fetch after a custom point) or ignore the incremental cursor entirely, mirroring the CLI flags.
+- Articles are deduplicated by URL (the Cosmos `id` equals the article URL) and normalized per-domain partition keys, so repeated runs update existing documents even if NewsAPI changes the source name.
+- Each ingestion only requests stories published after the most recent one stored in Cosmos DB, keeping the “latest articles” panel focused on truly new coverage instead of repeating the same five headlines.
 
 ## Testing
 Use pytest for the lightweight configuration tests:

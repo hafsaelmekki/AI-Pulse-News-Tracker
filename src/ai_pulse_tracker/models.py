@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+import base64
+import hashlib
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 
 @dataclass(slots=True)
@@ -13,6 +16,14 @@ class Article:
     url: str
     published_at: datetime
 
+    def document_id(self) -> str:
+        if self.url:
+            return _encode_url_as_id(self.url)
+        return _hash_fallback_id(self.title, self.published_at)
+
+    def partition_key(self) -> str:
+        return _compute_partition_key(self.url, self.source or self.title)
+
 
 @dataclass(slots=True)
 class AnalyzedArticle(Article):
@@ -21,9 +32,14 @@ class AnalyzedArticle(Article):
     confidence_neu: float
     confidence_neg: float
 
+    def cosmos_id(self) -> str:
+        return self.document_id()
+
     def to_cosmos_document(self) -> Dict[str, Any]:
         return {
-            "source": self.source,
+            "id": self.cosmos_id(),
+            "source": self.partition_key(),
+            "source_name": self.source,
             "title": self.title,
             "sentiment": self.sentiment,
             "confidence": {
@@ -34,3 +50,40 @@ class AnalyzedArticle(Article):
             "url": self.url,
             "date": self.published_at.isoformat(),
         }
+
+
+@dataclass(slots=True)
+class UpsertResult:
+    ids: list[str]
+    created: int = 0
+    updated: int = 0
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+
+def _encode_url_as_id(url: str) -> str:
+    encoded = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"url::{encoded}"
+
+
+def _hash_fallback_id(title: str, published_at: datetime) -> str:
+    base = (title or "untitled").strip()
+    timestamp = _ensure_timezone(published_at).isoformat()
+    payload = f"{base}|{timestamp}".encode("utf-8")
+    return "hash::" + hashlib.sha1(payload).hexdigest()
+
+
+def _compute_partition_key(url: str | None, fallback: str) -> str:
+    if url:
+        host = urlparse(url).netloc.lower()
+        if host:
+            return host
+    sanitized = (fallback or "unknown").strip().lower()
+    return sanitized or "unknown"
+
+
+def _ensure_timezone(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
