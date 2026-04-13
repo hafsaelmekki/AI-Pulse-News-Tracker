@@ -1,76 +1,67 @@
-import os
-import uuid
-import requests
-from dotenv import load_dotenv
-from azure.ai.textanalytics import TextAnalyticsClient
-from azure.core.credentials import AzureKeyCredential
-from azure.cosmos import CosmosClient, PartitionKey
+from __future__ import annotations
 
-load_dotenv()
+import argparse
+from datetime import datetime, timezone
+import sys
+import time
+from pathlib import Path
 
-# --- Configuration ---
-# Azure AI
-AI_KEY = os.getenv("AZURE_AI_KEY")
-AI_ENDPOINT = os.getenv("AZURE_AI_ENDPOINT")
-# News API
-NEWS_KEY = os.getenv("NEWS_API_KEY")
-# Cosmos DB
-COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
-COSMOS_KEY = os.getenv("COSMOS_KEY")
-DATABASE_NAME = "NewsDatabase"
-CONTAINER_NAME = "Analyses"
+SRC_DIR = Path(__file__).resolve().parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
-# --- Fonctions ---
+from ai_pulse_tracker.pipeline import NewsAnalyzerPipeline
 
 
-def get_cosmos_container():
-    client = CosmosClient(COSMOS_ENDPOINT, COSMOS_KEY)
-    db = client.create_database_if_not_exists(id=DATABASE_NAME)
-    container = db.create_container_if_not_exists(
-        id=CONTAINER_NAME,
-        partition_key=PartitionKey(path="/source"),
-        offer_throughput=400  # Option gratuite
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fetch latest AI articles, analyze sentiment, and persist to Cosmos DB.",
     )
-    return container
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="Override the default NewsAPI query term.",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=0,
+        help="Enable real-time tracking by running every N seconds (min 30). 0 runs once.",
+    )
+    return parser.parse_args()
 
 
-def fetch_ai_news(query="Generative AI"):
-    url = f"https://newsapi.org/v2/everything?q={query}&language=fr&pageSize=5&apiKey={NEWS_KEY}"
-    response = requests.get(url)
-    return response.json().get("articles", []) if response.status_code == 200 else []
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def analyze_and_save():
-    ai_client = TextAnalyticsClient(AI_ENDPOINT, AzureKeyCredential(AI_KEY))
-    container = get_cosmos_container()
-    articles = fetch_ai_news()
+def run_once(pipeline: NewsAnalyzerPipeline, query: str | None) -> None:
+    inserted_ids = pipeline.run(query=query)
+    print(f"[{_timestamp()}] Persisted {len(inserted_ids)} analyzed articles.")
 
-    print(f"🔍 Analyse de {len(articles)} articles...")
 
-    for art in articles:
-        text = f"{art['title']}. {art['description']}"
-        sentiment_response = ai_client.analyze_sentiment(documents=[text])[0]
+def run_continuous(pipeline: NewsAnalyzerPipeline, query: str | None, interval: int) -> None:
+    delay = max(interval, 30)
+    print(
+        f"[{_timestamp()}] Starting real-time tracking loop every {delay} seconds "
+        f"(press Ctrl+C to stop)."
+    )
+    try:
+        while True:
+            run_once(pipeline, query)
+            time.sleep(delay)
+    except KeyboardInterrupt:
+        print(f"[{_timestamp()}] Stopped real-time tracking.")
 
-        # Structure de donnée propre (JSON)
-        doc = {
-            "id": str(uuid.uuid4()),
-            "source": art["source"]["name"],
-            "title": art["title"],
-            "sentiment": sentiment_response.sentiment,
-            "confidence": {
-                "pos": sentiment_response.confidence_scores.positive,
-                "neu": sentiment_response.confidence_scores.neutral,
-                "neg": sentiment_response.confidence_scores.negative
-            },
-            "url": art["url"],
-            "date": art["publishedAt"]
-        }
 
-        # Enregistrement dans Cosmos DB
-        container.upsert_item(doc)
-        print(
-            f"✅ Article sauvé : {art['title'][:50]}... [{sentiment_response.sentiment}]")
+def main() -> None:
+    args = parse_args()
+    pipeline = NewsAnalyzerPipeline()
+    if args.interval and args.interval > 0:
+        run_continuous(pipeline, args.query, args.interval)
+    else:
+        run_once(pipeline, args.query)
 
 
 if __name__ == "__main__":
-    analyze_and_save()
+    main()
