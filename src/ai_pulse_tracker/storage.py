@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from typing import Iterable, Sequence
+import hashlib
+import base64
 from datetime import datetime
 
 from azure.cosmos import ContainerProxy, CosmosClient, PartitionKey
@@ -37,7 +39,8 @@ class CosmosRepository:
             exists = self._item_exists(document["id"], partition_key)
             if not exists:
                 exists = self._delete_legacy_if_exists(
-                    document["id"], self._legacy_partitions(article, partition_key)
+                    self._legacy_ids(article),
+                    self._legacy_partitions(article, partition_key),
                 )
             self._container.upsert_item(document)
             persisted_ids.append(document["id"])
@@ -63,14 +66,26 @@ class CosmosRepository:
             candidates.append(legacy)
         return candidates
 
-    def _delete_legacy_if_exists(self, item_id: str, partitions: Sequence[str]) -> bool:
-        for partition in partitions:
-            try:
-                self._container.delete_item(item=item_id, partition_key=partition)
-                LOGGER.info("Removed legacy document %s in partition %s", item_id, partition)
-                return True
-            except CosmosResourceNotFoundError:
-                continue
+    def _legacy_ids(self, article: AnalyzedArticle) -> Sequence[str]:
+        ids: list[str] = []
+        if article.url:
+            encoded = base64.urlsafe_b64encode(article.url.encode("utf-8")).decode("ascii").rstrip("=")
+            ids.append(f"url::{encoded}")
+        hashed = hashlib.sha1(
+            f"{article.title}|{article.published_at.isoformat()}".encode("utf-8")
+        ).hexdigest()
+        ids.append(f"hash::{hashed}")
+        return ids
+
+    def _delete_legacy_if_exists(self, legacy_ids: Sequence[str], partitions: Sequence[str]) -> bool:
+        for item_id in legacy_ids:
+            for partition in partitions:
+                try:
+                    self._container.delete_item(item=item_id, partition_key=partition)
+                    LOGGER.info("Removed legacy document %s in partition %s", item_id, partition)
+                    return True
+                except CosmosResourceNotFoundError:
+                    continue
         return False
 
     def load_all(self) -> list[dict]:

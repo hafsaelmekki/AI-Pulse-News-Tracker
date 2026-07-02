@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from .config import Settings, load_settings
 from .models import UpsertResult
@@ -39,6 +39,8 @@ class NewsAnalyzerPipeline:
         if incremental:
             if effective_after is None:
                 effective_after = self._repository.latest_published_at()
+            if effective_after is None:
+                effective_after = datetime.now(timezone.utc) - timedelta(days=30)
         articles = self._news_client.fetch_articles(query, after=effective_after)
         if not articles:
             LOGGER.warning("No new articles retrieved from NewsAPI")

@@ -1,78 +1,152 @@
 # AI Pulse News Tracker
 
-AI Pulse News Tracker ingests the latest AI-related articles from NewsAPI, scores them with Azure AI Language, stores the enriched payload in Azure Cosmos DB, and exposes a Streamlit dashboard to explore the data.
+AI Pulse News Tracker collecte des articles récents sur l'intelligence artificielle, analyse leur sentiment avec Azure AI Language, les stocke dans Azure Cosmos DB, puis les affiche dans un tableau de bord Streamlit.
 
-## Features
-- French-language AI news ingestion via NewsAPI (batch size configurable through environment variables).
-- Azure Text Analytics sentiment scoring with confidence values retained per article.
-- Cosmos DB persistence with automatic database/container provisioning and article `id` set to the source URL so re-ingests update in place.
-- Streamlit dashboard showing KPIs, plots, and a latest-articles table backed by the Cosmos data.
+Le projet sert à suivre rapidement les tendances de l'actualité IA, en particulier les articles francophones, avec une lecture synthétique des volumes, sources et sentiments.
 
-## Project Layout
-```
+## Aperçu
+
+- Collecte d'articles via NewsAPI.
+- Analyse de sentiment via Azure AI Language.
+- Stockage des résultats enrichis dans Azure Cosmos DB.
+- Tableau de bord Streamlit avec indicateurs, graphiques et filtres.
+- Mode ponctuel ou suivi continu avec intervalle configurable.
+
+## Fonctionnalités
+
+- Ingestion incrémentale des nouveaux articles pour éviter les doublons.
+- Première exécution avec historique automatique sur les 30 derniers jours.
+- Déduplication par URL dans Cosmos DB.
+- Filtres par période, sentiment et mots-clés dans le dashboard.
+- Commandes CLI pour relancer une collecte complète ou depuis une date précise.
+
+## Architecture
+
+```text
 .
-|-- app.py               # Streamlit entry point (thin wrapper around the package)
-|-- news_analyzer.py     # CLI helper to run the ingestion pipeline once or continuously
+|-- app.py                 # Point d'entrée du dashboard Streamlit
+|-- news_analyzer.py       # CLI pour lancer l'ingestion
 |-- src/
 |   |-- ai_pulse_tracker/
-|       |-- config.py    # Settings loader + validation
-|       |-- dashboard.py # Streamlit UI definition
-|       |-- models.py    # Dataclasses shared across modules
-|       |-- news.py      # NewsAPI client
-|       |-- pipeline.py  # Orchestrates ingestion/analyze/persist flow
-|       |-- sentiment.py # Azure AI Language wrapper
-|       |-- storage.py   # Cosmos DB repository
-|-- tests/               # pytest-based smoke tests
-|-- .env.example         # Copy to .env and fill in your secrets
-|-- pyproject.toml       # Packaging + dependency definition
-|-- requirements.txt     # Runtime dependency mirror (optional)
+|       |-- config.py      # Chargement et validation de la configuration
+|       |-- dashboard.py   # Interface Streamlit
+|       |-- models.py      # Modèles de données
+|       |-- news.py        # Client NewsAPI
+|       |-- pipeline.py    # Orchestration collecte/analyse/stockage
+|       |-- sentiment.py   # Client Azure AI Language
+|       |-- storage.py     # Accès Azure Cosmos DB
+|-- tests/                 # Tests pytest
+|-- .env.example           # Modèle de configuration
+|-- pyproject.toml         # Packaging et dépendances
+|-- requirements.txt       # Dépendances runtime
 ```
 
-## Prerequisites
-- Python 3.10+
-- Azure subscription with AI Language + Cosmos DB (Core SQL API)
-- NewsAPI key
+## Prérequis
 
-## Setup
-1. Clone the repository and create a virtual environment.
-2. Copy `.env.example` to `.env` and populate all keys.
-3. Install dependencies (editable mode keeps `src/` on `PYTHONPATH`):
-   ```bash
-   pip install -e .[dev]
-   ```
+- Python 3.10 ou plus récent.
+- Une clé NewsAPI.
+- Un service Azure AI Language.
+- Un compte Azure Cosmos DB avec l'API Core SQL.
 
-## Usage
-### Run the ingestion pipeline once
-Fetch and analyze the newest AI stories (optionally override the query term):
+## Installation
+
+```bash
+git clone <url-du-repo>
+cd AI-Pulse-News-Tracker
+python -m venv venv
+venv\Scripts\activate
+pip install -e .[dev]
+```
+
+## Configuration
+
+Copier le fichier d'exemple :
+
+```bash
+copy .env.example .env
+```
+
+Puis remplir les variables dans `.env` :
+
+```env
+AZURE_AI_ENDPOINT=https://<your-ai-endpoint>.cognitiveservices.azure.com/
+AZURE_AI_KEY=
+NEWS_API_KEY=
+COSMOS_ENDPOINT=https://<your-account>.documents.azure.com:443/
+COSMOS_KEY=
+COSMOS_DATABASE=NewsDatabase
+COSMOS_CONTAINER=Analyses
+NEWS_QUERY=Generative AI
+NEWS_LANGUAGE=fr
+NEWS_BATCH_SIZE=5
+```
+
+Ne jamais publier le fichier `.env` sur GitHub. Le dépôt doit seulement contenir `.env.example`.
+
+## Utilisation
+
+Lancer une collecte ponctuelle :
+
+```bash
+python news_analyzer.py
+```
+
+Utiliser une requête spécifique :
+
 ```bash
 python news_analyzer.py --query "Generative AI"
 ```
-- Need to reprocess older coverage? Append `--full-refresh` to ignore the incremental cursor or pass `--since 2024-04-01T00:00:00Z` to re-fetch articles after a specific timestamp.
 
-### Launch the dashboard
+Relancer une collecte depuis une date :
+
+```bash
+python news_analyzer.py --since 2024-04-01T00:00:00Z
+```
+
+Ignorer le curseur incrémental et récupérer le dernier lot :
+
+```bash
+python news_analyzer.py --full-refresh
+```
+
+Lancer un suivi continu toutes les deux minutes :
+
+```bash
+python news_analyzer.py --interval 120
+```
+
+## Dashboard
+
+Lancer l'interface Streamlit :
+
 ```bash
 streamlit run app.py
 ```
-The Streamlit script loads the Cosmos DB container and visualizes article counts, sentiment distribution, and raw entries.
 
-## Real-time Tracking
-- **Continuous ingestion:** run `python news_analyzer.py --interval 120` to pull/analyze news every two minutes (Ctrl+C to stop). The CLI enforces a 30-second minimum cadence to protect the upstream APIs.
-- **On-demand ingestion:** inside the Streamlit app, use the sidebar "Ingest latest articles" button to trigger a fresh NewsAPI pull + Azure analysis and refresh the dashboard cache immediately.
-- The sidebar also exposes optional fields to supply an ISO datetime (to re-fetch after a custom point) or ignore the incremental cursor entirely, mirroring the CLI flags.
-- Articles are deduplicated by URL (the Cosmos `id` equals the article URL) and normalized per-domain partition keys, so repeated runs update existing documents even if NewsAPI changes the source name.
-- Each ingestion only requests stories published after the most recent one stored in Cosmos DB, keeping the “latest articles” panel focused on truly new coverage instead of repeating the same five headlines.
+Le dashboard permet de :
 
-## Testing
-Use pytest for the lightweight configuration tests:
+- visualiser le nombre d'articles analysés ;
+- identifier le sentiment dominant ;
+- comparer les sources ;
+- filtrer par période, sentiment et mots-clés ;
+- déclencher une nouvelle ingestion depuis la barre latérale.
+
+## Tests
+
 ```bash
 pytest
 ```
 
-## Configuration Reference
-Environment variables (see `.env.example`):
-- `AZURE_AI_ENDPOINT`, `AZURE_AI_KEY`
-- `NEWS_API_KEY`
-- `COSMOS_ENDPOINT`, `COSMOS_KEY`
-- Optional overrides: `COSMOS_DATABASE`, `COSMOS_CONTAINER`, `NEWS_QUERY`, `NEWS_LANGUAGE`, `NEWS_BATCH_SIZE`
+## Roadmap
 
-Missing required keys will raise a `SettingsError` before any API call is issued.
+- Ajouter plus de sources d'actualité.
+- Ajouter des alertes email ou Discord.
+- Ajouter un résumé automatique des articles.
+- Ajouter un export CSV ou JSON depuis le dashboard.
+- Déployer le dashboard sur Streamlit Community Cloud ou Azure.
+
+## Sécurité
+
+- Garder les clés API dans `.env`.
+- Vérifier que `.env` est bien ignoré par Git.
+- Utiliser `.env.example` uniquement pour documenter les variables attendues.

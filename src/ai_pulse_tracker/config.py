@@ -24,7 +24,7 @@ class Settings:
     container_name: str = "Analyses"
     news_query: str = "Generative AI"
     news_language: str = "fr"
-    news_batch_size: int = 5
+    news_batch_size: int = 50
     news_max_lookback_days: int = 29
 
 
@@ -68,6 +68,6 @@ def load_settings(dotenv_path: str | os.PathLike[str] | None = None) -> Settings
         container_name=env.get("COSMOS_CONTAINER", "Analyses"),
         news_query=env.get("NEWS_QUERY", "Generative AI"),
         news_language=env.get("NEWS_LANGUAGE", "fr"),
-        news_batch_size=int(env.get("NEWS_BATCH_SIZE", 5)),
+        news_batch_size=int(env.get("NEWS_BATCH_SIZE", 50)),
         news_max_lookback_days=int(env.get("NEWS_MAX_LOOKBACK_DAYS", 29)),
     )

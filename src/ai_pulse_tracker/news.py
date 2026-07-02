@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+import math
 import requests
 
 from .config import Settings
 from .models import Article
 
 LOGGER = logging.getLogger(__name__)
+MAX_NEWSAPI_PAGES = 5
 
 
 class NewsAPIError(RuntimeError):
@@ -20,13 +22,10 @@ class NewsClient:
         self._session = session or requests.Session()
 
     def fetch_articles(self, query: str | None = None, after: datetime | None = None) -> list[Article]:
-        params = {
-            "q": query or self._settings.news_query,
-            "language": self._settings.news_language,
-            "pageSize": self._settings.news_batch_size,
-            "apiKey": self._settings.news_api_key,
-            "sortBy": "publishedAt",
-        }
+        desired_count = max(1, self._settings.news_batch_size)
+        page_size = min(desired_count, 100)
+        max_pages = min(MAX_NEWSAPI_PAGES, math.ceil(desired_count / page_size))
+
         effective_after = _clamp_after_to_lookback(
             after,
             self._settings.news_max_lookback_days,
@@ -37,37 +36,54 @@ class NewsClient:
                 after.isoformat(),
                 effective_after.isoformat(),
             )
-        if effective_after:
-            params["from"] = _format_from_param(effective_after)
-        response = self._session.get(
-            "https://newsapi.org/v2/everything",
-            params=params,
-            timeout=15,
-        )
-        _raise_for_newsapi_error(response)
-        payload = response.json()
-
-        if payload.get("status") != "ok":
-            raise RuntimeError(f"NewsAPI responded with: {payload}")
 
         articles: list[Article] = []
-        for entry in payload.get("articles", []):
-            published_raw = entry.get("publishedAt") or datetime.utcnow().isoformat()
-            published_at = _parse_date(published_raw)
-            description = entry.get("description") or ""
-
-            articles.append(
-                Article(
-                    source=entry["source"].get("name", "Unknown"),
-                    title=entry.get("title", "Untitled"),
-                    description=description,
-                    url=entry.get("url", ""),
-                    published_at=published_at,
-                )
+        for page in range(1, max_pages + 1):
+            params = {
+                "q": query or self._settings.news_query,
+                "language": self._settings.news_language,
+                "pageSize": page_size,
+                "page": page,
+                "apiKey": self._settings.news_api_key,
+                "sortBy": "publishedAt",
+            }
+            if effective_after:
+                params["from"] = _format_from_param(effective_after)
+            response = self._session.get(
+                "https://newsapi.org/v2/everything",
+                params=params,
+                timeout=15,
             )
+            _raise_for_newsapi_error(response)
+            payload = response.json()
 
-        LOGGER.info("Fetched %s articles", len(articles))
-        return articles
+            if payload.get("status") != "ok":
+                raise RuntimeError(f"NewsAPI responded with: {payload}")
+
+            batch = []
+            for entry in payload.get("articles", []):
+                published_raw = entry.get("publishedAt") or datetime.utcnow().isoformat()
+                published_at = _parse_date(published_raw)
+                description = entry.get("description") or ""
+
+                batch.append(
+                    Article(
+                        source=entry["source"].get("name", "Unknown"),
+                        title=entry.get("title", "Untitled"),
+                        description=description,
+                        url=entry.get("url", ""),
+                        published_at=published_at,
+                    )
+                )
+
+            articles.extend(batch)
+            LOGGER.debug("Fetched %s articles on page %s", len(batch), page)
+
+            if len(articles) >= desired_count or len(batch) < page_size:
+                break
+
+        LOGGER.info("Fetched %s articles", min(len(articles), desired_count))
+        return articles[:desired_count]
 
 
 def _parse_date(value: str) -> datetime:
