@@ -18,6 +18,8 @@ Goal: make the Streamlit dashboard more business-oriented.
 - Add source and topic trend views.
 - Add article importance filtering.
 
+Status: implemented with keyword trends, source coverage and importance-based filtering.
+
 ## Step 3 - Generative AI Summaries
 
 Goal: produce short and useful summaries.
