@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import base64
 import hashlib
@@ -31,6 +31,8 @@ class AnalyzedArticle(Article):
     confidence_pos: float
     confidence_neu: float
     confidence_neg: float
+    keywords: list[str] = field(default_factory=list)
+    importance_score: float = 0.0
 
     def cosmos_id(self) -> str:
         return self.document_id()
@@ -41,12 +43,15 @@ class AnalyzedArticle(Article):
             "source": self.partition_key(),
             "source_name": self.source,
             "title": self.title,
+            "description": self.description or "",
             "sentiment": self.sentiment,
             "confidence": {
                 "pos": self.confidence_pos,
                 "neu": self.confidence_neu,
                 "neg": self.confidence_neg,
             },
+            "keywords": self.keywords,
+            "importance_score": self.importance_score,
             "url": self.url,
             "date": self.published_at.isoformat(),
         }
@@ -64,14 +69,14 @@ class UpsertResult:
 
 def _encode_url_as_id(url: str) -> str:
     encoded = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
-    return f"url::{encoded}"
+    return f"url__{encoded}"
 
 
 def _hash_fallback_id(title: str, published_at: datetime) -> str:
     base = (title or "untitled").strip()
     timestamp = _ensure_timezone(published_at).isoformat()
     payload = f"{base}|{timestamp}".encode("utf-8")
-    return "hash::" + hashlib.sha1(payload).hexdigest()
+    return "hash__" + hashlib.sha1(payload).hexdigest()
 
 
 def _compute_partition_key(url: str | None, fallback: str) -> str:

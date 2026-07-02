@@ -11,7 +11,6 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from ai_pulse_tracker.models import UpsertResult
-from ai_pulse_tracker.pipeline import NewsAnalyzerPipeline
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +85,8 @@ def run_continuous(pipeline: NewsAnalyzerPipeline, args: argparse.Namespace) -> 
 
 
 def main() -> None:
+    from ai_pulse_tracker.pipeline import NewsAnalyzerPipeline
+
     args = parse_args()
     pipeline = NewsAnalyzerPipeline()
     if args.interval and args.interval > 0:

@@ -8,6 +8,7 @@ from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 
 from .config import Settings
+from .enrichment import compute_importance_score, extract_keywords
 from .models import AnalyzedArticle, Article
 
 LOGGER = logging.getLogger(__name__)
@@ -22,28 +23,51 @@ class SentimentClient:
         article_list = list(articles)
         if not article_list:
             return []
-        documents = [f"{article.title}. {article.description}".strip() for article in article_list]
-
-        try:
-            responses = self._client.analyze_sentiment(documents=documents)
-        except HttpResponseError as exc:
-            raise RuntimeError("Azure AI sentiment analysis failed") from exc
 
         analyzed: list[AnalyzedArticle] = []
-        for article, result in zip(article_list, responses):
-            analyzed.append(
-                AnalyzedArticle(
-                    source=article.source,
+        batch_size = 10  # Azure Text Analytics sentiment endpoint max documents per request
+        for start in range(0, len(article_list), batch_size):
+            batch = article_list[start : start + batch_size]
+            documents = [
+                f"{article.title}. {article.description}".strip()
+                for article in batch
+            ]
+
+            try:
+                responses = self._client.analyze_sentiment(documents=documents)
+            except HttpResponseError as exc:
+                raise RuntimeError("Azure AI sentiment analysis failed") from exc
+
+            for article, result in zip(batch, responses):
+                keywords = extract_keywords(article.title, article.description)
+                confidence_scores = result.confidence_scores
+                importance_score = compute_importance_score(
                     title=article.title,
                     description=article.description,
                     url=article.url,
-                    published_at=article.published_at,
-                    sentiment=result.sentiment,
-                    confidence_pos=result.confidence_scores.positive,
-                    confidence_neu=result.confidence_scores.neutral,
-                    confidence_neg=result.confidence_scores.negative,
+                    source=article.source,
+                    sentiment_confidence=max(
+                        confidence_scores.positive,
+                        confidence_scores.neutral,
+                        confidence_scores.negative,
+                    ),
+                    keywords=keywords,
                 )
-            )
+                analyzed.append(
+                    AnalyzedArticle(
+                        source=article.source,
+                        title=article.title,
+                        description=article.description,
+                        url=article.url,
+                        published_at=article.published_at,
+                        sentiment=result.sentiment,
+                        confidence_pos=confidence_scores.positive,
+                        confidence_neu=confidence_scores.neutral,
+                        confidence_neg=confidence_scores.negative,
+                        keywords=keywords,
+                        importance_score=importance_score,
+                    )
+                )
 
         LOGGER.info("Analyzed %s articles", len(analyzed))
         return analyzed
