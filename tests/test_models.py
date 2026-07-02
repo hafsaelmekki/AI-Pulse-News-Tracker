@@ -20,6 +20,7 @@ def _make_article() -> AnalyzedArticle:
         confidence_neg=0.05,
         keywords=["sample", "desc"],
         importance_score=82.5,
+        summary="Sample summary",
     )
 
 
@@ -38,6 +39,7 @@ def test_to_cosmos_document_includes_id():
     assert doc["description"] == "Desc"
     assert doc["keywords"] == ["sample", "desc"]
     assert doc["importance_score"] == 82.5
+    assert doc["summary"] == "Sample summary"
 
 
 def test_partition_key_falls_back_to_source_when_url_missing():

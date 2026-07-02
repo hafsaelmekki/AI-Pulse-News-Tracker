@@ -8,7 +8,11 @@ from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 
 from .config import Settings
-from .enrichment import compute_importance_score, extract_keywords
+from .enrichment import (
+    compute_importance_score,
+    extract_keywords,
+    generate_article_summary,
+)
 from .models import AnalyzedArticle, Article
 
 LOGGER = logging.getLogger(__name__)
@@ -53,6 +57,13 @@ class SentimentClient:
                     ),
                     keywords=keywords,
                 )
+                summary = generate_article_summary(
+                    title=article.title,
+                    description=article.description,
+                    keywords=keywords,
+                    sentiment=result.sentiment,
+                    importance_score=importance_score,
+                )
                 analyzed.append(
                     AnalyzedArticle(
                         source=article.source,
@@ -66,6 +77,7 @@ class SentimentClient:
                         confidence_neg=confidence_scores.negative,
                         keywords=keywords,
                         importance_score=importance_score,
+                        summary=summary,
                     )
                 )
 

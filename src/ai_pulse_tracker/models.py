@@ -33,6 +33,7 @@ class AnalyzedArticle(Article):
     confidence_neg: float
     keywords: list[str] = field(default_factory=list)
     importance_score: float = 0.0
+    summary: str = ""
 
     def cosmos_id(self) -> str:
         return self.document_id()
@@ -52,6 +53,7 @@ class AnalyzedArticle(Article):
             },
             "keywords": self.keywords,
             "importance_score": self.importance_score,
+            "summary": self.summary,
             "url": self.url,
             "date": self.published_at.isoformat(),
         }

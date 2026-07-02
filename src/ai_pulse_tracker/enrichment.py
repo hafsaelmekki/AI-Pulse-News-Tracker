@@ -95,6 +95,35 @@ def compute_importance_score(
     return round(completeness_score + confidence_score + keyword_score, 2)
 
 
+def generate_article_summary(
+    *,
+    title: str,
+    description: str | None,
+    keywords: Iterable[str],
+    sentiment: str,
+    importance_score: float,
+    max_length: int = 320,
+) -> str:
+    title_text = _clean_text(title)
+    description_text = _clean_text(description or "")
+    if title_text and description_text and description_text.lower() not in title_text.lower():
+        summary = f"{title_text} - {description_text}"
+    else:
+        summary = description_text or title_text
+
+    topics = ", ".join(list(keywords)[:3])
+    signals: list[str] = []
+    if topics:
+        signals.append(f"Topics: {topics}")
+    if sentiment:
+        signals.append(f"Sentiment: {sentiment}")
+    if importance_score > 0:
+        signals.append(f"Importance: {importance_score:.1f}/100")
+    if signals:
+        summary = f"{summary} ({' | '.join(signals)})" if summary else " | ".join(signals)
+    return _truncate_text(summary, max_length)
+
+
 def _normalize_token(token: str) -> str:
     return token.strip("'-").lower()
 
@@ -105,3 +134,13 @@ def _is_keyword_candidate(word: str) -> bool:
         and word not in _STOPWORDS
         and not word.isnumeric()
     )
+
+
+def _clean_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _truncate_text(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    return value[: max(0, max_length - 3)].rstrip() + "..."
