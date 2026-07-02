@@ -28,6 +28,8 @@ Goal: produce short and useful summaries.
 - Add daily or weekly trend summaries.
 - Keep summaries reproducible and stored with each article.
 
+Status: article-level summaries are implemented with local deterministic generation and stored with each ingested article. LLM-based daily or weekly summaries remain planned.
+
 ## Step 4 - Semantic Search and RAG
 
 Goal: query articles by meaning, not only keywords.
@@ -35,6 +37,8 @@ Goal: query articles by meaning, not only keywords.
 - Generate embeddings for article content.
 - Store vectors in a vector database or a compatible search layer.
 - Add semantic search over collected articles.
+
+Status: RAG-ready local retrieval is implemented with ranked article search over titles, summaries, descriptions, keywords and importance scores. Embeddings and vector storage remain planned.
 
 ## Step 5 - AI Agent
 

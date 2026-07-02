@@ -9,6 +9,7 @@ import streamlit as st
 from .config import load_settings
 from .models import UpsertResult
 from .pipeline import NewsAnalyzerPipeline
+from .retrieval import build_retrieval_answer, search_articles
 from .trends import count_keywords, format_keywords, normalize_keywords
 
 st.set_page_config(page_title="AI Pulse Tracker", layout="wide")
@@ -103,6 +104,19 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         prepared["source"] = prepared["source_name"].fillna(prepared["source"])
     if "description" not in prepared.columns:
         prepared["description"] = ""
+    if "summary" not in prepared.columns:
+        prepared["summary"] = ""
+    prepared["summary"] = prepared["summary"].fillna("").astype(str)
+    missing_summary = prepared["summary"].str.strip() == ""
+    prepared.loc[missing_summary, "summary"] = prepared.loc[
+        missing_summary,
+        "description",
+    ].fillna("")
+    missing_summary = prepared["summary"].str.strip() == ""
+    prepared.loc[missing_summary, "summary"] = prepared.loc[
+        missing_summary,
+        "title",
+    ].fillna("")
     if "keywords" not in prepared.columns:
         prepared["keywords"] = [[] for _ in range(len(prepared))]
     prepared["keywords"] = prepared["keywords"].apply(normalize_keywords)
@@ -223,6 +237,36 @@ def render_dashboard() -> None:
     col4.metric("Avg Importance", f"{df['importance_score'].mean():.1f}")
 
     st.divider()
+    st.subheader("RAG-ready Search")
+    search_query = st.text_input(
+        "Ask about stored articles",
+        placeholder="What are the AI agent trends this week?",
+    )
+    if search_query.strip():
+        search_results = search_articles(
+            df.to_dict("records"),
+            search_query,
+            limit=5,
+        )
+        st.write(build_retrieval_answer(search_query, search_results))
+        if search_results:
+            st.dataframe(
+                pd.DataFrame(search_results)[
+                    [
+                        "rank",
+                        "score",
+                        "source",
+                        "title",
+                        "summary",
+                        "matched_terms",
+                        "importance_score",
+                        "url",
+                    ]
+                ],
+                use_container_width=True,
+            )
+
+    st.divider()
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Sentiment Distribution")
@@ -286,14 +330,34 @@ def render_dashboard() -> None:
     st.subheader("High Importance Articles")
     st.dataframe(
         df.sort_values("importance_score", ascending=False)[
-            ["date", "source", "title", "sentiment", "importance_score", "keyword_text", "url"]
+            [
+                "date",
+                "source",
+                "title",
+                "summary",
+                "sentiment",
+                "importance_score",
+                "keyword_text",
+                "url",
+            ]
         ].head(20),
         use_container_width=True,
     )
 
     st.subheader("Latest Articles")
     st.dataframe(
-        df[["date", "source", "title", "sentiment", "importance_score", "keyword_text", "url"]],
+        df[
+            [
+                "date",
+                "source",
+                "title",
+                "summary",
+                "sentiment",
+                "importance_score",
+                "keyword_text",
+                "url",
+            ]
+        ],
         use_container_width=True,
     )
 
