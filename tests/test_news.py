@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ai_pulse_tracker.news import _format_from_param
+from ai_pulse_tracker.news import _clamp_after_to_lookback, _format_from_param
 from news_analyzer import _parse_since
 
 
@@ -24,3 +24,18 @@ def test_parse_since_supports_z_suffix():
 def test_parse_since_assumes_utc_for_naive():
     dt = _parse_since("2024-02-01T10:30:00")
     assert dt.isoformat() == "2024-02-01T10:30:00+00:00"
+
+
+def test_clamp_after_to_lookback_limits_old_dates():
+    now = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+    old_date = datetime(2026, 4, 12, 14, 31, 0, tzinfo=timezone.utc)
+
+    clamped = _clamp_after_to_lookback(old_date, 29, now=now)
+
+    assert clamped == datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_clamp_after_to_lookback_can_be_disabled():
+    old_date = datetime(2026, 4, 12, 14, 31, 0, tzinfo=timezone.utc)
+
+    assert _clamp_after_to_lookback(old_date, 0) == old_date

@@ -25,6 +25,7 @@ class Settings:
     news_query: str = "Generative AI"
     news_language: str = "fr"
     news_batch_size: int = 5
+    news_max_lookback_days: int = 29
 
 
 _REQUIRED_ENV_VARS: tuple[str, ...] = (
@@ -68,4 +69,5 @@ def load_settings(dotenv_path: str | os.PathLike[str] | None = None) -> Settings
         news_query=env.get("NEWS_QUERY", "Generative AI"),
         news_language=env.get("NEWS_LANGUAGE", "fr"),
         news_batch_size=int(env.get("NEWS_BATCH_SIZE", 5)),
+        news_max_lookback_days=int(env.get("NEWS_MAX_LOOKBACK_DAYS", 29)),
     )

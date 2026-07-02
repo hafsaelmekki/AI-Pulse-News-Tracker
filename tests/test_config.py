@@ -25,6 +25,7 @@ COSMOS_KEY=cosmos
 NEWS_QUERY=machine learning
 NEWS_LANGUAGE=en
 NEWS_BATCH_SIZE=10
+NEWS_MAX_LOOKBACK_DAYS=14
 """.strip()
     env_file.write_text(content, encoding="utf-8")
 
@@ -37,6 +38,7 @@ NEWS_BATCH_SIZE=10
     assert settings.news_query == "machine learning"
     assert settings.news_language == "en"
     assert settings.news_batch_size == 10
+    assert settings.news_max_lookback_days == 14
 
 
 def test_load_settings_missing_keys(tmp_path, monkeypatch):
