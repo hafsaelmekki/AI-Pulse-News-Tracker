@@ -6,10 +6,11 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from .agent import answer_question
 from .config import load_settings
 from .models import UpsertResult
 from .pipeline import NewsAnalyzerPipeline
-from .retrieval import build_retrieval_answer, search_articles
+from .retrieval import search_articles
 from .trends import count_keywords, format_keywords, normalize_keywords
 
 st.set_page_config(page_title="AI Pulse Tracker", layout="wide")
@@ -237,9 +238,9 @@ def render_dashboard() -> None:
     col4.metric("Avg Importance", f"{df['importance_score'].mean():.1f}")
 
     st.divider()
-    st.subheader("RAG-ready Search")
+    st.subheader("AI Trend Assistant")
     search_query = st.text_input(
-        "Ask about stored articles",
+        "Ask a question about stored articles",
         placeholder="What are the AI agent trends this week?",
     )
     if search_query.strip():
@@ -248,8 +249,9 @@ def render_dashboard() -> None:
             search_query,
             limit=5,
         )
-        st.write(build_retrieval_answer(search_query, search_results))
+        st.markdown(answer_question(search_query, search_results))
         if search_results:
+            st.caption("Retrieved article evidence")
             st.dataframe(
                 pd.DataFrame(search_results)[
                     [

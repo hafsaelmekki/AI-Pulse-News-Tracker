@@ -48,6 +48,8 @@ Goal: provide an assistant for trend questions.
 - Retrieve relevant articles before answering.
 - Cite sources from the stored article database.
 
+Status: implemented as a local retrieval-grounded assistant that answers from stored articles and cites retrieved sources. LLM-based reasoning remains planned.
+
 ## Step 6 - Deployment
 
 Goal: make the project easy to run and demonstrate.
