@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ai_pulse_tracker.agent import answer_question
+from ai_pulse_tracker.agent import answer_question, is_conversation_prompt
 
 
 def _results() -> list[dict]:
@@ -41,3 +41,19 @@ def test_answer_question_handles_empty_results():
     answer = answer_question("What are the AI trends?", [])
 
     assert "could not find stored articles" in answer
+
+
+def test_answer_question_handles_conversation_prompts():
+    answer = answer_question("hey Hafsa", [])
+
+    assert is_conversation_prompt("hey Hafsa")
+    assert "Hey Hafsa" in answer
+    assert "could not find stored articles" not in answer
+
+
+def test_answer_question_does_not_search_language_switch_prompt():
+    answer = answer_question("can we speak in english", _results())
+
+    assert is_conversation_prompt("can we speak in english")
+    assert "Yes Hafsa" in answer
+    assert "strongest signals" not in answer

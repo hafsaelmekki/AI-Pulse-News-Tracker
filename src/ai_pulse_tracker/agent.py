@@ -7,8 +7,101 @@ from typing import Any
 from .trends import normalize_keywords
 
 
+CONVERSATION_STARTERS = {
+    "hello",
+    "hey",
+    "hi",
+    "bonjour",
+    "bonsoir",
+    "salut",
+    "coucou",
+}
+
+META_PROMPTS = {
+    "can we speak",
+    "can we talk",
+    "speak english",
+    "speak in english",
+    "talk english",
+    "talk in english",
+    "parler anglais",
+    "en anglais",
+    "tu peux parler",
+    "what can you do",
+    "who are you",
+    "help me",
+}
+
+DATA_QUERY_TERMS = {
+    "ai",
+    "ia",
+    "rag",
+    "llm",
+    "genai",
+    "agent",
+    "agents",
+    "article",
+    "articles",
+    "news",
+    "trend",
+    "trends",
+    "tendance",
+    "tendances",
+    "source",
+    "sources",
+    "company",
+    "companies",
+    "entreprise",
+    "entreprises",
+    "openai",
+    "anthropic",
+    "claude",
+    "sentiment",
+    "regulation",
+    "automation",
+    "automatisation",
+}
+
+
+def is_conversation_prompt(question: str) -> bool:
+    normalized = question.strip().lower()
+    if not normalized:
+        return True
+
+    first_word = normalized.replace(",", " ").replace("!", " ").split(maxsplit=1)[0]
+    if first_word in CONVERSATION_STARTERS:
+        return True
+    if any(phrase in normalized for phrase in META_PROMPTS):
+        return True
+    return not _is_data_query(normalized)
+
+
+def answer_conversation(question: str) -> str:
+    normalized = question.strip().lower()
+    first_word = normalized.replace(",", " ").replace("!", " ").split(maxsplit=1)[0]
+    if _asks_for_english(normalized):
+        return (
+            "Yes Hafsa, we can speak in English. "
+            "Ask me about AI trends, RAG, AI agents, companies, sources, "
+            "sentiment, or important signals from the collected articles."
+        )
+    if not normalized or first_word in CONVERSATION_STARTERS:
+        return (
+            "Hey Hafsa. Je suis ton assistant AI Pulse. "
+            "Tu peux me demander les tendances IA, les sujets RAG, agents IA, "
+            "entreprises citees, sources importantes ou signaux faibles."
+        )
+    return (
+        "Oui Hafsa, je suis la. Pose-moi une question sur les tendances IA "
+        "ou sur les articles collectes dans AI Pulse."
+    )
+
+
 def answer_question(question: str, retrieved_articles: list[Mapping[str, Any]]) -> str:
     question = question.strip()
+    if is_conversation_prompt(question):
+        return answer_conversation(question)
+
     if not retrieved_articles:
         return (
             f"I could not find stored articles that answer: {question}. "
@@ -91,3 +184,19 @@ def _top_keywords(retrieved_articles: list[Mapping[str, Any]], limit: int = 5) -
 
 def _citation_labels(retrieved_articles: list[Mapping[str, Any]]) -> list[str]:
     return [f"[{index}]" for index in range(1, len(retrieved_articles) + 1)]
+
+
+def _asks_for_english(normalized_question: str) -> bool:
+    return any(
+        phrase in normalized_question
+        for phrase in {
+            "english",
+            "anglais",
+            "en anglais",
+        }
+    )
+
+
+def _is_data_query(normalized_question: str) -> bool:
+    words = set(normalized_question.replace("?", " ").replace(",", " ").split())
+    return any(term in words or term in normalized_question for term in DATA_QUERY_TERMS)
