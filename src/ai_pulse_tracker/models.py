@@ -34,6 +34,8 @@ class AnalyzedArticle(Article):
     keywords: list[str] = field(default_factory=list)
     importance_score: float = 0.0
     summary: str = ""
+    embedding: list[float] = field(default_factory=list)
+    embedding_model: str = ""
 
     def cosmos_id(self) -> str:
         return self.document_id()
@@ -54,6 +56,8 @@ class AnalyzedArticle(Article):
             "keywords": self.keywords,
             "importance_score": self.importance_score,
             "summary": self.summary,
+            "embedding": self.embedding,
+            "embedding_model": self.embedding_model,
             "url": self.url,
             "date": self.published_at.isoformat(),
         }

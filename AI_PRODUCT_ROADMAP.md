@@ -38,7 +38,7 @@ Goal: query articles by meaning, not only keywords.
 - Store vectors in a vector database or a compatible search layer.
 - Add semantic search over collected articles.
 
-Status: RAG-ready local retrieval is implemented with ranked article search over titles, summaries, descriptions, keywords and importance scores. Embeddings and vector storage remain planned.
+Status: RAG-ready local retrieval is implemented with ranked article search over titles, summaries, descriptions, keywords and importance scores. Local deterministic embeddings now provide hybrid vector scoring and are stored with each article document. A dedicated vector database remains planned.
 
 ## Step 5 - AI Agent
 

@@ -8,6 +8,7 @@ from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 
 from .config import Settings
+from .embeddings import EMBEDDING_MODEL_NAME, article_embedding_text, embed_text
 from .enrichment import (
     compute_importance_score,
     extract_keywords,
@@ -64,6 +65,15 @@ class SentimentClient:
                     sentiment=result.sentiment,
                     importance_score=importance_score,
                 )
+                embedding = embed_text(
+                    article_embedding_text(
+                        title=article.title,
+                        summary=summary,
+                        description=article.description,
+                        source=article.source,
+                        keywords=keywords,
+                    )
+                )
                 analyzed.append(
                     AnalyzedArticle(
                         source=article.source,
@@ -78,6 +88,8 @@ class SentimentClient:
                         keywords=keywords,
                         importance_score=importance_score,
                         summary=summary,
+                        embedding=embedding,
+                        embedding_model=EMBEDDING_MODEL_NAME,
                     )
                 )
 

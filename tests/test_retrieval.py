@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ai_pulse_tracker.embeddings import article_embedding_text, embed_text
 from ai_pulse_tracker.retrieval import build_retrieval_answer, search_articles
 
 
@@ -15,6 +16,15 @@ def _rows() -> list[dict]:
             "importance_score": 90,
             "keywords": ["ai", "agents", "automation"],
             "url": "https://example.com/agents",
+            "embedding": embed_text(
+                article_embedding_text(
+                    title="OpenAI launches new AI agent tools",
+                    summary="Enterprise teams use AI agents to automate workflows.",
+                    description="The announcement focuses on automation and agent orchestration.",
+                    source="Tech News",
+                    keywords=["ai", "agents", "automation"],
+                )
+            ),
         },
         {
             "date": "2026-07-03T09:00:00+00:00",
@@ -37,6 +47,7 @@ def test_search_articles_returns_ranked_matches():
     assert results[0]["title"] == "OpenAI launches new AI agent tools"
     assert "automation" in results[0]["matched_terms"]
     assert results[0]["score"] > 0
+    assert results[0]["vector_score"] > 0
 
 
 def test_search_articles_returns_empty_for_unmatched_query():

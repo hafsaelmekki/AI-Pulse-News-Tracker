@@ -255,6 +255,7 @@ def render_dashboard() -> None:
                     [
                         "rank",
                         "score",
+                        "vector_score",
                         "source",
                         "title",
                         "summary",

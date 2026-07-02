@@ -21,6 +21,8 @@ def _make_article() -> AnalyzedArticle:
         keywords=["sample", "desc"],
         importance_score=82.5,
         summary="Sample summary",
+        embedding=[0.1, 0.2, 0.3],
+        embedding_model="local-test",
     )
 
 
@@ -40,6 +42,8 @@ def test_to_cosmos_document_includes_id():
     assert doc["keywords"] == ["sample", "desc"]
     assert doc["importance_score"] == 82.5
     assert doc["summary"] == "Sample summary"
+    assert doc["embedding"] == [0.1, 0.2, 0.3]
+    assert doc["embedding_model"] == "local-test"
 
 
 def test_partition_key_falls_back_to_source_when_url_missing():

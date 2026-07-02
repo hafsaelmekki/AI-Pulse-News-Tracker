@@ -5,6 +5,12 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .embeddings import (
+    DEFAULT_DIMENSIONS,
+    article_embedding_text,
+    cosine_similarity,
+    embed_text,
+)
 from .trends import format_keywords, normalize_keywords
 
 
@@ -46,9 +52,10 @@ def search_articles(
         return []
 
     query_counter = Counter(query_terms)
+    query_vector = embed_text(query)
     results: list[dict[str, Any]] = []
     for row in rows:
-        result = _score_row(row, query, query_counter)
+        result = _score_row(row, query, query_counter, query_vector)
         if result["score"] > 0:
             results.append(result)
 
@@ -102,6 +109,7 @@ def _score_row(
     row: Mapping[str, Any],
     query: str,
     query_counter: Counter[str],
+    query_vector: list[float],
 ) -> dict[str, Any]:
     title = str(row.get("title") or "")
     summary = str(row.get("summary") or "")
@@ -112,22 +120,41 @@ def _score_row(
 
     title_terms = set(_tokenize(title))
     keyword_terms = set(_tokenize(" ".join(keywords)))
-    body_terms = Counter(_tokenize(" ".join([title, summary, description, source])))
+    search_text = _search_text(row)
+    body_terms = Counter(_tokenize(search_text))
     matched_terms = sorted(set(query_counter).intersection(body_terms))
-    if not matched_terms:
-        return _result(row, 0.0, [], keywords, source, importance_score)
+    vector_score = cosine_similarity(query_vector, _row_embedding(row, search_text))
 
     overlap_score = sum(min(query_counter[term], body_terms[term]) for term in matched_terms) * 10
     title_score = len(set(query_counter).intersection(title_terms)) * 5
     keyword_score = len(set(query_counter).intersection(keyword_terms)) * 7
-    phrase_score = 15 if query.strip().lower() in _search_text(row).lower() else 0
-    score = overlap_score + title_score + keyword_score + phrase_score + importance_score / 20
-    return _result(row, round(score, 2), matched_terms, keywords, source, importance_score)
+    phrase_score = 15 if query.strip().lower() in search_text.lower() else 0
+    semantic_score = vector_score * 25
+    score = (
+        overlap_score
+        + title_score
+        + keyword_score
+        + phrase_score
+        + semantic_score
+        + importance_score / 20
+    )
+    if not matched_terms and vector_score < 0.32:
+        score = 0.0
+    return _result(
+        row,
+        round(score, 2),
+        round(vector_score, 3),
+        matched_terms,
+        keywords,
+        source,
+        importance_score,
+    )
 
 
 def _result(
     row: Mapping[str, Any],
     score: float,
+    vector_score: float,
     matched_terms: list[str],
     keywords: list[str],
     source: str,
@@ -135,6 +162,7 @@ def _result(
 ) -> dict[str, Any]:
     return {
         "score": score,
+        "vector_score": vector_score,
         "matched_terms": ", ".join(matched_terms),
         "date": row.get("date", ""),
         "source": source,
@@ -149,15 +177,23 @@ def _result(
 
 
 def _search_text(row: Mapping[str, Any]) -> str:
-    return " ".join(
-        [
-            str(row.get("title") or ""),
-            str(row.get("summary") or ""),
-            str(row.get("description") or ""),
-            str(row.get("source") or row.get("source_name") or ""),
-            " ".join(normalize_keywords(row.get("keywords"))),
-        ]
+    return article_embedding_text(
+        title=str(row.get("title") or ""),
+        summary=str(row.get("summary") or ""),
+        description=str(row.get("description") or ""),
+        source=str(row.get("source") or row.get("source_name") or ""),
+        keywords=normalize_keywords(row.get("keywords")),
     )
+
+
+def _row_embedding(row: Mapping[str, Any], fallback_text: str) -> list[float]:
+    raw_embedding = row.get("embedding")
+    if isinstance(raw_embedding, list) and len(raw_embedding) == DEFAULT_DIMENSIONS:
+        try:
+            return [float(value) for value in raw_embedding]
+        except (TypeError, ValueError):
+            pass
+    return embed_text(fallback_text)
 
 
 def _tokenize(text: str) -> list[str]:
