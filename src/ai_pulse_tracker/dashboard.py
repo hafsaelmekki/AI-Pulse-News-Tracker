@@ -173,29 +173,6 @@ def _render_overview(df: pd.DataFrame) -> None:
     col3.metric("Unique Sources", int(df["source"].nunique()))
     col4.metric("Avg Importance", f"{df['importance_score'].mean():.1f}")
 
-    st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Sentiment Distribution")
-        st.plotly_chart(
-            px.pie(
-                df,
-                names="sentiment",
-                color="sentiment",
-                color_discrete_map={
-                    "positive": "#00CC96",
-                    "neutral": "#636EFA",
-                    "negative": "#EF553B",
-                },
-            ),
-            use_container_width=True,
-        )
-    with c2:
-        st.subheader("Average Confidence")
-        avg_pos = df["pos_score"].mean()
-        st.progress(avg_pos, text=f"Optimism index: {avg_pos:.0%}")
-        st.caption("Scores reported by Azure AI Language")
-
 
 def _render_kpi_cards(df: pd.DataFrame) -> None:
     st.subheader("Dashboard KPIs")
@@ -324,6 +301,112 @@ def _render_trends(df: pd.DataFrame) -> None:
             ).update_layout(yaxis={"categoryorder": "total ascending"}),
             use_container_width=True,
         )
+
+
+def _render_sentiment_analysis(df: pd.DataFrame) -> None:
+    st.subheader("Sentiment Analysis")
+
+    sentiment_df = _sentiment_distribution_dataframe(df)
+    daily_score_df = _daily_sentiment_score_dataframe(df)
+
+    distribution_col, evolution_col = st.columns(2)
+    with distribution_col:
+        st.markdown("**Sentiment distribution**")
+        if sentiment_df.empty:
+            st.info("No sentiment data available yet.")
+        else:
+            st.plotly_chart(
+                px.pie(
+                    sentiment_df,
+                    names="sentiment",
+                    values="articles",
+                    hole=0.45,
+                    color="sentiment",
+                    color_discrete_map={
+                        "positive": "#00CC96",
+                        "neutral": "#636EFA",
+                        "negative": "#EF553B",
+                    },
+                ),
+                use_container_width=True,
+            )
+
+    with evolution_col:
+        st.markdown("**Average sentiment over time**")
+        if daily_score_df.empty:
+            st.info("Not enough dated articles to plot sentiment evolution.")
+        else:
+            st.plotly_chart(
+                px.line(
+                    daily_score_df,
+                    x="date",
+                    y="average_sentiment",
+                    markers=True,
+                    range_y=[-1, 1],
+                ).update_layout(
+                    yaxis_title="Average sentiment (-1 negative, +1 positive)",
+                    xaxis_title="Date",
+                ),
+                use_container_width=True,
+            )
+
+    insight = _sentiment_trend_insight(daily_score_df)
+    if insight:
+        st.info(insight)
+
+
+def _sentiment_distribution_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    sentiments = df["sentiment"].fillna("").astype(str).str.lower().str.strip()
+    sentiments = sentiments[sentiments != ""]
+    if sentiments.empty:
+        return pd.DataFrame(columns=["sentiment", "articles"])
+    return (
+        sentiments.value_counts()
+        .rename_axis("sentiment")
+        .reset_index(name="articles")
+        .sort_values("articles", ascending=False)
+    )
+
+
+def _daily_sentiment_score_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    trend_df = df.copy()
+    trend_df["date"] = pd.to_datetime(trend_df["date"], utc=True, errors="coerce")
+    trend_df["sentiment_score"] = (
+        trend_df["sentiment"]
+        .fillna("")
+        .astype(str)
+        .str.lower()
+        .map({"positive": 1.0, "neutral": 0.0, "negative": -1.0})
+    )
+    trend_df = trend_df.dropna(subset=["date", "sentiment_score"])
+    if trend_df.empty:
+        return pd.DataFrame(columns=["date", "average_sentiment", "articles"])
+
+    trend_df["date"] = trend_df["date"].dt.date
+    return (
+        trend_df.groupby("date", as_index=False)
+        .agg(
+            average_sentiment=("sentiment_score", "mean"),
+            articles=("title", "count"),
+        )
+        .sort_values("date")
+    )
+
+
+def _sentiment_trend_insight(daily_score_df: pd.DataFrame) -> str | None:
+    if len(daily_score_df) < 2:
+        return None
+
+    recent_df = daily_score_df.tail(3)
+    previous_score = float(recent_df.iloc[0]["average_sentiment"])
+    latest_score = float(recent_df.iloc[-1]["average_sentiment"])
+    delta = latest_score - previous_score
+
+    if delta <= -0.2:
+        return "Signal: sentiment has become more negative over the latest available days."
+    if delta >= 0.2:
+        return "Signal: sentiment has become more positive over the latest available days."
+    return "Signal: sentiment is broadly stable over the latest available days."
 
 
 def _render_evidence(search_results: list[dict[str, object]]) -> None:
@@ -508,6 +591,8 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
 
     filtered_df = _add_confidence_scores(filtered_df)
     _render_overview(filtered_df)
+    st.divider()
+    _render_sentiment_analysis(filtered_df)
     st.divider()
     _render_trends(filtered_df)
     st.divider()
