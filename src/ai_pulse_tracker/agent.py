@@ -2,10 +2,35 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
+import os
 from typing import Any
+
+import requests
 
 from .trends import normalize_keywords
 
+
+AI_PULSE_SYSTEM_PROMPT = """
+You are AI Pulse Assistant, a professional AI market intelligence analyst.
+
+Your job is to answer questions using only the retrieved AI Pulse articles.
+Use a concise executive style: direct answer first, then key insights, then evidence.
+
+Pipeline:
+Cosmos DB articles -> retrieval -> structured article context -> LLM -> analytical answer with sources.
+
+Rules:
+- Do not invent facts that are not present in the retrieved articles.
+- Mention uncertainty when the evidence is limited.
+- Use citations like [1], [2], [3] when referring to articles.
+- Prioritize business relevance: trends, companies, risks, opportunities, and signals.
+- Keep the answer clear, polished, and recruiter/demo friendly.
+- Always include a sources section with source names and URLs when URLs are available.
+- If the user asks a conversational or language-switching question, answer naturally
+  without using retrieved articles.
+""".strip()
+
+LLM_TIMEOUT_SECONDS = 20
 
 CONVERSATION_STARTERS = {
     "hello",
@@ -98,6 +123,7 @@ def answer_conversation(question: str) -> str:
 
 
 def answer_question(question: str, retrieved_articles: list[Mapping[str, Any]]) -> str:
+    """Cosmos DB articles -> retrieval -> article context -> LLM -> sourced answer."""
     question = question.strip()
     if is_conversation_prompt(question):
         return answer_conversation(question)
@@ -108,6 +134,117 @@ def answer_question(question: str, retrieved_articles: list[Mapping[str, Any]]) 
             "Try a broader question or ingest more recent articles."
         )
 
+    article_context = _article_context(retrieved_articles)
+    messages = build_llm_messages(question, article_context)
+    llm_answer = _try_generate_with_llm(messages)
+    if llm_answer:
+        return _ensure_source_appendix(llm_answer, retrieved_articles)
+
+    return _professional_fallback_answer(question, retrieved_articles)
+
+
+def build_llm_messages(
+    question: str,
+    article_context: list[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    normalized_context = (
+        list(article_context)
+        if article_context and "rank" in article_context[0]
+        else _article_context(article_context)
+    )
+    context_lines = [
+        "Retrieved AI Pulse articles:",
+        "",
+    ]
+    for article in normalized_context:
+        context_lines.extend(
+            [
+                f"[{article['rank']}] {article['title']}",
+                f"Source: {article['source']}",
+                f"Sentiment: {article['sentiment']}",
+                f"Importance score: {article['importance_score']}",
+                f"Summary: {article['summary']}",
+                f"URL: {article['url']}",
+                "",
+            ]
+        )
+
+    user_prompt = "\n".join(
+        [
+            "\n".join(context_lines).strip(),
+            "",
+            f"User question: {question}",
+            "",
+            (
+                "Generate a professional analytical answer grounded only in the "
+                "articles above. Include source citations and source URLs."
+            ),
+        ]
+    )
+    return [
+        {"role": "system", "content": AI_PULSE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _try_generate_with_llm(messages: list[dict[str, str]]) -> str | None:
+    api_key = os.getenv("AI_PULSE_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    endpoint = os.getenv(
+        "AI_PULSE_LLM_ENDPOINT",
+        "https://api.openai.com/v1/chat/completions",
+    )
+    model = os.getenv("AI_PULSE_LLM_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+
+    try:
+        response = requests.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": 0.2,
+            },
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        answer = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError, requests.RequestException):
+        return None
+
+    answer = str(answer).strip()
+    return answer or None
+
+
+def _article_context(retrieved_articles: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    context: list[dict[str, Any]] = []
+    for index, article in enumerate(retrieved_articles, start=1):
+        context.append(
+            {
+                "rank": index,
+                "title": str(article.get("title", "")).strip() or "Untitled article",
+                "summary": str(article.get("summary", "")).strip()
+                or str(article.get("description", "")).strip()
+                or "No summary available.",
+                "sentiment": str(article.get("sentiment", "")).strip() or "unknown",
+                "importance_score": _format_importance(article.get("importance_score")),
+                "source": str(article.get("source", "")).strip() or "Unknown source",
+                "url": str(article.get("url", "")).strip() or "No URL available.",
+            }
+        )
+    return context
+
+
+def _professional_fallback_answer(
+    question: str,
+    retrieved_articles: list[Mapping[str, Any]],
+) -> str:
     citations = _citation_labels(retrieved_articles)
     keywords = _top_keywords(retrieved_articles)
     sentiment_counts = Counter(
@@ -116,18 +253,61 @@ def answer_question(question: str, retrieved_articles: list[Mapping[str, Any]]) 
         if str(article.get("sentiment", "")).strip()
     )
     dominant_sentiment = sentiment_counts.most_common(1)[0][0] if sentiment_counts else "unknown"
+    focus = ", ".join(keywords[:5]) if keywords else "the retrieved articles"
 
     lines = [
-        f"Answer based on {len(retrieved_articles)} retrieved article(s):",
+        "### Executive answer",
+        (
+            f"The available AI Pulse evidence points to {focus} as the main signal for "
+            f"your question. The dominant sentiment across the retrieved articles is "
+            f"{dominant_sentiment}."
+        ),
         "",
-        _overview_sentence(question, keywords, dominant_sentiment, citations),
-        "",
-        "Key signals:",
+        "### Key insights",
     ]
-    lines.extend(_signal_lines(retrieved_articles, citations))
-    lines.extend(["", "Sources:"])
+    lines.extend(_insight_lines(retrieved_articles, citations))
+    lines.extend(
+        [
+            "",
+            "### Evidence",
+        ]
+    )
     lines.extend(_source_lines(retrieved_articles, citations))
+    lines.extend(
+        [
+            "",
+            "### Suggested next step",
+            f"Use this answer as a first-pass market signal, then review the cited sources before making a decision about: {question}",
+        ]
+    )
     return "\n".join(lines)
+
+
+def _ensure_source_appendix(
+    answer: str,
+    retrieved_articles: list[Mapping[str, Any]],
+) -> str:
+    source_urls = [
+        str(article.get("url", "")).strip()
+        for article in retrieved_articles
+        if str(article.get("url", "")).strip()
+    ]
+    if source_urls and any(url in answer for url in source_urls):
+        return answer
+
+    citations = _citation_labels(retrieved_articles)
+    source_lines = _source_lines(retrieved_articles, citations)
+    if not source_lines:
+        return answer
+
+    return "\n".join(
+        [
+            answer.rstrip(),
+            "",
+            "### Sources used",
+            *source_lines,
+        ]
+    )
 
 
 def _overview_sentence(
@@ -159,6 +339,25 @@ def _signal_lines(
     return lines
 
 
+def _insight_lines(
+    retrieved_articles: list[Mapping[str, Any]],
+    citations: list[str],
+) -> list[str]:
+    lines: list[str] = []
+    for article, citation in zip(retrieved_articles[:3], citations):
+        title = str(article.get("title", "")).strip() or "Untitled article"
+        summary = str(article.get("summary", "")).strip()
+        sentiment = str(article.get("sentiment", "")).strip() or "unknown"
+        importance = _format_importance(article.get("importance_score"))
+        source = str(article.get("source", "")).strip() or "Unknown source"
+        signal = summary or title
+        lines.append(
+            f"- {signal} {citation} Source: {source}. "
+            f"Sentiment: {sentiment}. Importance: {importance}."
+        )
+    return lines
+
+
 def _source_lines(
     retrieved_articles: list[Mapping[str, Any]],
     citations: list[str],
@@ -167,11 +366,19 @@ def _source_lines(
     for article, citation in zip(retrieved_articles, citations):
         source = str(article.get("source", "")).strip() or "Unknown source"
         title = str(article.get("title", "")).strip() or "Untitled article"
+        sentiment = str(article.get("sentiment", "")).strip() or "unknown"
+        importance = _format_importance(article.get("importance_score"))
         url = str(article.get("url", "")).strip()
         if url:
-            lines.append(f"- {citation} {source}: {title} ({url})")
+            lines.append(
+                f"- {citation} {source}: {title} "
+                f"| Sentiment: {sentiment} | Importance: {importance} | {url}"
+            )
         else:
-            lines.append(f"- {citation} {source}: {title}")
+            lines.append(
+                f"- {citation} {source}: {title} "
+                f"| Sentiment: {sentiment} | Importance: {importance}"
+            )
     return lines
 
 
@@ -200,3 +407,10 @@ def _asks_for_english(normalized_question: str) -> bool:
 def _is_data_query(normalized_question: str) -> bool:
     words = set(normalized_question.replace("?", " ").replace(",", " ").split())
     return any(term in words or term in normalized_question for term in DATA_QUERY_TERMS)
+
+
+def _format_importance(value: Any) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "unknown"

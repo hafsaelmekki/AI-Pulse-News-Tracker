@@ -6,3 +6,4 @@ plotly
 python-dotenv
 requests
 streamlit
+openai
