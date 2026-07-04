@@ -197,6 +197,96 @@ def _render_overview(df: pd.DataFrame) -> None:
         st.caption("Scores reported by Azure AI Language")
 
 
+def _render_kpi_cards(df: pd.DataFrame) -> None:
+    st.subheader("Dashboard KPIs")
+
+    date_series = pd.to_datetime(df["date"], utc=True, errors="coerce")
+    now = datetime.now(timezone.utc)
+    today_count = int((date_series.dt.date == now.date()).sum())
+    week_count = int((date_series >= now - timedelta(days=7)).sum())
+    sentiment_label, sentiment_delta = _average_sentiment(df)
+    positive_pct = _sentiment_percentage(df, "positive")
+    negative_pct = _sentiment_percentage(df, "negative")
+    top_article = _top_article_label(df)
+    top_source = _top_value(df, "source")
+    dominant_topic = _dominant_topic(df)
+
+    first_row = st.columns(4)
+    first_row[0].metric("Total articles", int(len(df)))
+    first_row[1].metric("Articles today", today_count)
+    first_row[2].metric("Articles this week", week_count)
+    first_row[3].metric("Average sentiment", sentiment_label, sentiment_delta)
+
+    second_row = st.columns(4)
+    second_row[0].metric("Positive articles", f"{positive_pct:.0f}%")
+    second_row[1].metric("Negative articles", f"{negative_pct:.0f}%")
+    second_row[2].metric("Most active source", top_source)
+    second_row[3].metric("Dominant topic", dominant_topic)
+
+    st.metric("Most important article", top_article)
+
+
+def _average_sentiment(df: pd.DataFrame) -> tuple[str, str]:
+    sentiment_scores = (
+        df["sentiment"]
+        .fillna("")
+        .astype(str)
+        .str.lower()
+        .map({"positive": 1.0, "neutral": 0.0, "negative": -1.0})
+        .dropna()
+    )
+    if sentiment_scores.empty:
+        return "N/A", "no sentiment"
+
+    average = float(sentiment_scores.mean())
+    if average >= 0.25:
+        label = "Positive"
+    elif average <= -0.25:
+        label = "Negative"
+    else:
+        label = "Neutral"
+    return label, f"{average:+.2f}"
+
+
+def _sentiment_percentage(df: pd.DataFrame, sentiment: str) -> float:
+    if df.empty:
+        return 0.0
+    sentiments = df["sentiment"].fillna("").astype(str).str.lower()
+    return float(sentiments.eq(sentiment).mean() * 100)
+
+
+def _top_article_label(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "N/A"
+    article = df.sort_values("importance_score", ascending=False).iloc[0]
+    title = str(article.get("title", "")).strip() or "Untitled article"
+    score = float(article.get("importance_score", 0.0) or 0.0)
+    return f"{_shorten_text(title, 80)} ({score:.1f})"
+
+
+def _top_value(df: pd.DataFrame, column: str) -> str:
+    if column not in df.columns:
+        return "N/A"
+    counts = df[column].fillna("").astype(str).str.strip()
+    counts = counts[counts != ""].value_counts()
+    if counts.empty:
+        return "N/A"
+    return _shorten_text(str(counts.index[0]), 40)
+
+
+def _dominant_topic(df: pd.DataFrame) -> str:
+    keyword_df = _keyword_dataframe(df, limit=1)
+    if keyword_df.empty:
+        return "N/A"
+    return _shorten_text(str(keyword_df.iloc[0]["keyword"]), 40)
+
+
+def _shorten_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
 def _render_trends(df: pd.DataFrame) -> None:
     trend_col, source_col = st.columns(2)
     with trend_col:
@@ -375,6 +465,9 @@ def _render_ingestion_controls() -> str | None:
 
 
 def _render_dashboard_view(df: pd.DataFrame) -> None:
+    _render_kpi_cards(df)
+    st.divider()
+
     st.subheader("Filters")
     sentiments_available = sorted(df["sentiment"].dropna().unique().tolist())
     time_labels = list(_time_filters().keys())
