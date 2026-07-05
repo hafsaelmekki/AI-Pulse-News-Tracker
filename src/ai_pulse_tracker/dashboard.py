@@ -747,13 +747,27 @@ def _render_importance_analysis(df: pd.DataFrame) -> None:
 
     top_col, distribution_col = st.columns((1.4, 1))
     with top_col:
-        st.markdown("**Top 5 most important articles**")
-        top_articles = _top_importance_articles(df)
-        if top_articles.empty:
-            st.info("No importance scores available yet.")
+        st.markdown("**Importance moyenne dans le temps**")
+        daily_importance_df = _daily_importance_dataframe(df)
+        if daily_importance_df.empty:
+            st.info("Not enough dated importance data yet.")
         else:
-            st.dataframe(top_articles, use_container_width=True,
-                         hide_index=True)
+            st.plotly_chart(
+                px.line(
+                    daily_importance_df,
+                    x="date",
+                    y="avg_importance",
+                    hover_data={"articles": True, "avg_importance": ":.1f"},
+                ).update_traces(
+                    line={"color": "#0891B2", "width": 3, "shape": "spline"},
+                ).update_layout(
+                    xaxis_title="Date",
+                    yaxis_title="Average importance",
+                    yaxis={"range": [0, 100]},
+                    showlegend=False,
+                ),
+                use_container_width=True,
+            )
 
     with distribution_col:
         st.markdown("**Importance score distribution**")
@@ -773,6 +787,9 @@ def _render_importance_analysis(df: pd.DataFrame) -> None:
             ),
             use_container_width=True,
         )
+
+    st.markdown("**Top 5 articles importants**")
+    _render_top_importance_article_cards(df)
 
     st.markdown("**Sentiment vs importance**")
     st.plotly_chart(
@@ -795,23 +812,101 @@ def _render_importance_analysis(df: pd.DataFrame) -> None:
     )
 
 
-def _top_importance_articles(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(
-            columns=["Title", "Source", "Date",
-                     "Sentiment", "Importance", "URL"]
-        )
+def _render_top_importance_article_cards(df: pd.DataFrame) -> None:
+    articles = _top_importance_articles(df)
+    if not articles:
+        st.info("No important articles available yet.")
+        return
 
-    top_df = df.sort_values("importance_score", ascending=False).head(5).copy()
-    return pd.DataFrame(
-        {
-            "Title": top_df["title"].fillna("").astype(str),
-            "Source": top_df["source"].fillna("").astype(str),
-            "Date": top_df["date"].fillna("").astype(str),
-            "Sentiment": top_df["sentiment"].fillna("").astype(str).str.capitalize(),
-            "Importance": top_df["importance_score"].map(lambda score: f"{score:.1f}"),
-            "URL": top_df["url"].fillna("").astype(str),
-        }
+    cards = []
+    for article in articles:
+        title = html.escape(article["title"])
+        source = html.escape(article["source"])
+        date = html.escape(article["date"])
+        score = html.escape(article["score"])
+        url = html.escape(article["url"], quote=True)
+        card_content = (
+            "<div style='height:100%;border:1px solid rgba(8,145,178,0.18);"
+            "border-radius:8px;padding:14px 14px 12px;background:white;"
+            "box-shadow:0 8px 22px rgba(15,23,42,0.08);'>"
+            "<div style='display:flex;justify-content:space-between;gap:10px;"
+            "align-items:center;margin-bottom:10px;'>"
+            "<span style='font-size:0.76rem;font-weight:800;color:#0891B2;"
+            "text-transform:uppercase;letter-spacing:0;'>Importance</span>"
+            "<span style='background:#0891B2;color:white;border-radius:999px;"
+            "padding:3px 9px;font-size:0.78rem;font-weight:800;'>"
+            f"{score}</span>"
+            "</div>"
+            "<div style='font-size:1rem;font-weight:800;line-height:1.25;"
+            "color:#1F2937;margin-bottom:12px;'>"
+            f"{title}</div>"
+            "<div style='font-size:0.82rem;color:#6B7280;line-height:1.35;'>"
+            f"{source}<br>{date}</div>"
+            "</div>"
+        )
+        if url:
+            cards.append(
+                "<a href='"
+                f"{url}"
+                "' target='_blank' rel='noopener noreferrer' "
+                "style='text-decoration:none;color:inherit;'>"
+                f"{card_content}</a>"
+            )
+        else:
+            cards.append(card_content)
+
+    st.markdown(
+        "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));"
+        "gap:12px;margin:8px 0 18px;'>"
+        + "".join(cards)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _top_importance_articles(df: pd.DataFrame) -> list[dict[str, str]]:
+    if df.empty:
+        return []
+
+    top_df = df.sort_values("importance_score", ascending=False).head(5)
+    articles: list[dict[str, str]] = []
+    for _, article in top_df.iterrows():
+        raw_date = pd.to_datetime(article.get("date"), utc=True, errors="coerce")
+        date = raw_date.strftime("%Y-%m-%d") if not pd.isna(raw_date) else ""
+        score = float(article.get("importance_score", 0.0) or 0.0)
+        articles.append(
+            {
+                "title": _shorten_text(
+                    str(article.get("title", "")).strip() or "Untitled article",
+                    95,
+                ),
+                "source": str(article.get("source", "")).strip() or "Unknown source",
+                "date": date,
+                "score": f"{score:.1f}",
+                "url": str(article.get("url", "")).strip(),
+            }
+        )
+    return articles
+
+
+def _daily_importance_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    trend_df = df.copy()
+    trend_df["date"] = pd.to_datetime(
+        trend_df["date"], utc=True, errors="coerce")
+    trend_df["importance_score"] = pd.to_numeric(
+        trend_df["importance_score"], errors="coerce")
+    trend_df = trend_df.dropna(subset=["date", "importance_score"])
+    if trend_df.empty:
+        return pd.DataFrame(columns=["date", "avg_importance", "articles"])
+
+    trend_df["date"] = trend_df["date"].dt.date
+    return (
+        trend_df.groupby("date", as_index=False)
+        .agg(
+            avg_importance=("importance_score", "mean"),
+            articles=("title", "count"),
+        )
+        .sort_values("date")
     )
 
 

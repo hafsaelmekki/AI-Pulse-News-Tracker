@@ -9,7 +9,8 @@ __pycache__/
 *.log
 .pytest_cache/
 .mypy_cache/
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 .vscode/
 .idea/
 .DS_Store
