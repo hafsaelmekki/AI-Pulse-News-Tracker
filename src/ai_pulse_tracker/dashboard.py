@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import html
+import json
 import math
 
 import pandas as pd
@@ -9,10 +11,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from .agent import answer_conversation, answer_question, is_conversation_prompt
+from .agent import (
+    answer_conversation,
+    answer_dashboard_question,
+    detect_dashboard_intent,
+    is_conversation_prompt,
+)
 from .config import load_settings
 from .models import UpsertResult
 from .pipeline import NewsAnalyzerPipeline
+from .relevance import ai_relevance_reason
 from .retrieval import search_articles
 from .trends import count_keywords, normalize_keywords
 
@@ -61,6 +69,8 @@ ASSISTANT_DEFAULT_SUGGESTIONS = [
     "Which companies are most visible in AI Pulse?",
     "What changed in AI Pulse sentiment over time?",
 ]
+CONTEXT_TEXT_LIMIT = 220
+CONTEXT_SENTIMENT_DAYS = 14
 
 
 @st.cache_resource(show_spinner=False)
@@ -193,6 +203,23 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "keywords" not in prepared.columns:
         prepared["keywords"] = [[] for _ in range(len(prepared))]
     prepared["keywords"] = prepared["keywords"].apply(normalize_keywords)
+    relevance_reasons = prepared.apply(ai_relevance_reason, axis=1)
+    existing_relevance = prepared.get(
+        "ai_relevance",
+        pd.Series([False for _ in range(len(prepared))], index=prepared.index),
+    ).fillna(False).astype(bool)
+    computed_relevance = relevance_reasons.astype(bool)
+    prepared = prepared[existing_relevance | computed_relevance].copy()
+    if prepared.empty:
+        return prepared
+    if "ai_relevance_reason" not in prepared.columns:
+        prepared["ai_relevance_reason"] = ""
+    prepared["ai_relevance_reason"] = prepared["ai_relevance_reason"].fillna("").astype(str)
+    missing_relevance_reason = prepared["ai_relevance_reason"].str.strip() == ""
+    prepared.loc[missing_relevance_reason, "ai_relevance_reason"] = relevance_reasons.loc[
+        prepared.index
+    ]
+    prepared["ai_relevance"] = True
     if "importance_score" not in prepared.columns:
         prepared["importance_score"] = 0.0
     prepared["importance_score"] = pd.to_numeric(
@@ -408,6 +435,13 @@ def _shorten_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3].rstrip() + "..."
+
+
+def truncate_text(text: object, max_chars: int = CONTEXT_TEXT_LIMIT) -> str:
+    value = str(text or "").strip()
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 3].rstrip() + "..."
 
 
 def _render_trends(df: pd.DataFrame) -> None:
@@ -935,11 +969,11 @@ def _render_top_importance_article_cards(df: pd.DataFrame) -> None:
     )
 
 
-def _top_importance_articles(df: pd.DataFrame) -> list[dict[str, str]]:
+def _top_importance_articles(df: pd.DataFrame, limit: int = 5) -> list[dict[str, str]]:
     if df.empty:
         return []
 
-    top_df = df.sort_values("importance_score", ascending=False).head(5)
+    top_df = df.sort_values("importance_score", ascending=False).head(limit)
     articles: list[dict[str, str]] = []
     for _, article in top_df.iterrows():
         raw_date = pd.to_datetime(article.get("date"), utc=True, errors="coerce")
@@ -1097,8 +1131,12 @@ def _source_strategy_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             columns=["Source", "articles", "Avg sentiment", "Avg importance"]
         )
 
+    source_input = df
+    if "sentiment_score" not in source_input.columns:
+        source_input = _add_confidence_scores(source_input)
+
     source_df = (
-        df.groupby("source", as_index=False)
+        source_input.groupby("source", as_index=False)
         .agg(
             articles=("title", "count"),
             avg_sentiment=("sentiment_score", "mean"),
@@ -1216,6 +1254,226 @@ def _render_evidence(search_results: list[dict[str, object]]) -> None:
         )
 
 
+def build_dashboard_context(filtered_df: pd.DataFrame) -> dict[str, object]:
+    return build_compact_dashboard_context(filtered_df)
+
+
+def build_compact_dashboard_context(filtered_df: pd.DataFrame) -> dict[str, object]:
+    if filtered_df.empty:
+        return {
+            "total_articles": 0,
+            "date_range": {"start": None, "end": None},
+            "sentiment_distribution": [],
+            "sentiment_by_day": [],
+            "average_importance_score": 0.0,
+            "top_important_articles": [],
+            "top_sources": [],
+            "top_companies": [],
+            "top_topics": [],
+            "negative_high_importance_articles": [],
+            "weak_signals": [],
+        }
+
+    date_series = pd.to_datetime(
+        filtered_df.get("date", pd.Series(dtype=str)),
+        utc=True,
+        errors="coerce",
+    ).dropna()
+    date_range = {
+        "start": date_series.min().date().isoformat() if not date_series.empty else None,
+        "end": date_series.max().date().isoformat() if not date_series.empty else None,
+    }
+    sentiment_by_day = _last_sentiment_days(
+        _daily_sentiment_percentage_dataframe(filtered_df),
+        CONTEXT_SENTIMENT_DAYS,
+    )
+    sentiment_distribution = _sentiment_distribution_dataframe(filtered_df)
+    return {
+        "total_articles": int(len(filtered_df)),
+        "date_range": date_range,
+        "sentiment_distribution": _compact_records(sentiment_distribution),
+        "average_importance_score": _average_importance_score(filtered_df),
+        "dominant_sentiment": _dominant_sentiment_from_distribution(sentiment_distribution),
+        "sentiment_by_day": _compact_records(sentiment_by_day),
+        "top_important_articles": _compact_article_records(filtered_df, limit=5),
+        "negative_high_importance_articles": _negative_high_importance_articles(
+            filtered_df, limit=5
+        ),
+        "top_sources": _compact_records(_source_strategy_dataframe(filtered_df).head(10)),
+        "top_companies": _compact_records(_company_strategy_dataframe(filtered_df).head(10)),
+        "top_topics": _compact_records(_topic_counts_dataframe(filtered_df).head(10)),
+        "weak_signals": _compact_records(_weak_signals_dataframe(filtered_df)),
+    }
+
+
+def _records(df: pd.DataFrame) -> list[dict[str, object]]:
+    return _compact_records(df, text_limit=None)
+
+
+def _compact_records(
+    df: pd.DataFrame,
+    *,
+    text_limit: int | None = CONTEXT_TEXT_LIMIT,
+) -> list[dict[str, object]]:
+    if df.empty:
+        return []
+    clean_df = df.copy()
+    for column in clean_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(clean_df[column]):
+            clean_df[column] = clean_df[column].astype(str)
+        if text_limit is not None and clean_df[column].dtype == object:
+            clean_df[column] = clean_df[column].apply(
+                lambda value: truncate_text(value, text_limit)
+            )
+    return clean_df.to_dict("records")
+
+
+def _last_sentiment_days(sentiment_df: pd.DataFrame, days: int) -> pd.DataFrame:
+    if sentiment_df.empty:
+        return sentiment_df
+    scoped_df = sentiment_df.copy()
+    scoped_df["date"] = pd.to_datetime(scoped_df["date"], errors="coerce")
+    scoped_df = scoped_df.dropna(subset=["date"]).sort_values("date")
+    last_dates = scoped_df["date"].dt.date.drop_duplicates().tail(days)
+    return scoped_df[scoped_df["date"].dt.date.isin(set(last_dates))]
+
+
+def _dominant_sentiment_from_distribution(sentiment_df: pd.DataFrame) -> str:
+    if sentiment_df.empty:
+        return "unknown"
+    top_row = sentiment_df.sort_values("articles", ascending=False).iloc[0]
+    return str(top_row.get("sentiment", "unknown"))
+
+
+def _average_importance_score(df: pd.DataFrame) -> float:
+    if df.empty or "importance_score" not in df.columns:
+        return 0.0
+    scores = pd.to_numeric(df["importance_score"], errors="coerce").dropna()
+    if scores.empty:
+        return 0.0
+    return round(float(scores.mean()), 1)
+
+
+def _compact_article_records(
+    df: pd.DataFrame,
+    *,
+    limit: int,
+    include_url: bool = False,
+) -> list[dict[str, object]]:
+    if df.empty:
+        return []
+    top_df = df.sort_values("importance_score", ascending=False).head(limit)
+    articles: list[dict[str, object]] = []
+    for _, article in top_df.iterrows():
+        raw_date = pd.to_datetime(article.get("date"), utc=True, errors="coerce")
+        record: dict[str, object] = {
+            "title": truncate_text(article.get("title")),
+            "source": truncate_text(article.get("source")),
+            "date": raw_date.strftime("%Y-%m-%d") if not pd.isna(raw_date) else "",
+            "sentiment": truncate_text(article.get("sentiment"), 40),
+            "importance_score": round(
+                float(article.get("importance_score", 0.0) or 0.0), 1
+            ),
+            "summary": truncate_text(
+                article.get("summary") or article.get("description")
+            ),
+            "keywords": normalize_keywords(article.get("keywords"))[:8],
+            "companies": _detect_companies(article)[:5],
+        }
+        extracted_entities = article.get("extracted_entities")
+        if isinstance(extracted_entities, list):
+            record["extracted_entities"] = [
+                truncate_text(entity, 80) for entity in extracted_entities[:5]
+            ]
+        if include_url:
+            record["url"] = truncate_text(article.get("url"), 300)
+        articles.append(record)
+    return articles
+
+
+def _negative_high_importance_articles(
+    df: pd.DataFrame,
+    *,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    if df.empty:
+        return []
+    negative_df = df[
+        df["sentiment"].fillna("").astype(str).str.lower().eq("negative")
+        & (pd.to_numeric(df["importance_score"], errors="coerce").fillna(0.0) >= 70)
+    ].copy()
+    return _compact_article_records(negative_df, limit=limit)
+
+
+def _filter_assistant_dataframe_by_time(
+    df: pd.DataFrame,
+    prompt: str,
+) -> tuple[pd.DataFrame, str | None]:
+    window = _assistant_temporal_window(prompt)
+    if window is None or df.empty:
+        return df, None
+
+    start_date, end_date, label = window
+    scoped_df = df.copy()
+    scoped_df["date_dt"] = pd.to_datetime(scoped_df["date"], utc=True, errors="coerce")
+    start_dt = pd.Timestamp(start_date, tz="UTC")
+    end_dt = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+    scoped_df = scoped_df[
+        (scoped_df["date_dt"] >= start_dt) & (scoped_df["date_dt"] < end_dt)
+    ].drop(columns=["date_dt"])
+    return scoped_df, label
+
+
+def _assistant_temporal_window(
+    prompt: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[object, object, str] | None:
+    normalized = _normalize_prompt(prompt)
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+
+    if "today" in normalized or "aujourd'hui" in normalized or "aujourdhui" in normalized:
+        return today, today, "today"
+    if "yesterday" in normalized or "hier" in normalized:
+        yesterday = today - timedelta(days=1)
+        return yesterday, yesterday, "yesterday"
+    if "last 7 days" in normalized or "ces derniers jours" in normalized:
+        return today - timedelta(days=6), today, "last 7 days"
+    if "this week" in normalized:
+        start = today - timedelta(days=today.weekday())
+        return start, today, "this week"
+    if "last week" in normalized or "la semaine derniere" in normalized:
+        this_week_start = today - timedelta(days=today.weekday())
+        last_week_end = this_week_start - timedelta(days=1)
+        last_week_start = last_week_end - timedelta(days=6)
+        return last_week_start, last_week_end, "last week"
+    return None
+
+
+def _normalize_prompt(prompt: str) -> str:
+    return (
+        prompt.lower()
+        .replace("’", "'")
+        .replace("é", "e")
+        .replace("è", "e")
+        .replace("ê", "e")
+    )
+
+
+def _question_for_follow_up(intent: str, prompt: str) -> str:
+    base_questions = {
+        "trends": "What are the strongest AI Pulse trends?",
+        "sentiment": "What changed in AI Pulse sentiment over time?",
+        "companies": "Which companies are most mentioned in AI Pulse?",
+        "sources": "Which sources are most active in AI Pulse?",
+        "importance": "Which AI Pulse articles are most important?",
+        "weak_signals": "What weak signals should I watch in AI Pulse?",
+        "general_summary": "What happened in AI Pulse?",
+    }
+    return f"{base_questions.get(intent, base_questions['general_summary'])} {prompt}"
+
+
 def _render_ai_assistant(df: pd.DataFrame) -> None:
     st.subheader("AI Trend Assistant")
     st.caption(
@@ -1224,6 +1482,8 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
 
     if "agent_messages" not in st.session_state:
         st.session_state.agent_messages = []
+    if "assistant_answer_cache" not in st.session_state:
+        st.session_state.assistant_answer_cache = {}
 
     if st.button("Clear chat", key="clear-agent-chat"):
         st.session_state.agent_messages = []
@@ -1250,17 +1510,49 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
     if not prompt:
         return
 
-    if is_conversation_prompt(prompt):
+    detected_intent = detect_dashboard_intent(prompt)
+    last_intent = st.session_state.get("assistant_last_intent")
+    if detected_intent == "follow_up":
+        effective_intent = str(last_intent or "general_summary")
+        effective_question = _question_for_follow_up(effective_intent, prompt)
+    else:
+        effective_intent = detected_intent
+        effective_question = prompt
+
+    if detected_intent != "follow_up" and is_conversation_prompt(prompt):
         search_results = []
         answer = answer_conversation(prompt)
     else:
-        search_results = search_articles(
-            df.to_dict("records"),
-            prompt,
-            limit=5,
+        scoped_df, temporal_label = _filter_assistant_dataframe_by_time(
+            df,
+            effective_question,
         )
-        answer = answer_question(prompt, search_results)
-    suggestions = _assistant_suggestions_for_prompt(prompt)
+        dashboard_context = build_compact_dashboard_context(scoped_df)
+        if temporal_label:
+            dashboard_context["temporal_filter"] = temporal_label
+        search_results = search_articles(
+            scoped_df.to_dict("records"),
+            effective_question,
+            limit=3,
+        )
+        cache_key = _assistant_answer_cache_key(
+            effective_question,
+            effective_intent,
+            dashboard_context,
+        )
+        cached_answer = st.session_state.assistant_answer_cache.get(cache_key)
+        if cached_answer:
+            answer = cached_answer
+        else:
+            answer = answer_dashboard_question(
+                effective_question,
+                dashboard_context,
+                search_results,
+                intent=effective_intent,
+            )
+            st.session_state.assistant_answer_cache[cache_key] = answer
+        st.session_state["assistant_last_intent"] = effective_intent
+    suggestions = _assistant_suggestions_for_prompt(effective_question)
 
     user_message = {"role": "user", "content": prompt}
     assistant_message = {
@@ -1281,6 +1573,24 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
                 suggestions,
                 f"assistant-live-suggestion-{len(st.session_state.agent_messages)}",
             )
+
+
+def _assistant_answer_cache_key(
+    question: str,
+    intent: str,
+    dashboard_context: dict[str, object],
+) -> str:
+    payload = json.dumps(
+        {
+            "question": question,
+            "intent": intent,
+            "dashboard_context": dashboard_context,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 def _render_assistant_suggestions(
@@ -1609,6 +1919,12 @@ def render_dashboard() -> None:
         return
 
     df = _prepare_dataframe(df)
+    if df.empty:
+        if selected_section == "Assistant":
+            _render_ai_assistant(pd.DataFrame())
+        else:
+            st.warning("No AI-related documents found in Cosmos DB.")
+        return
 
     if selected_section == "Dashboard":
         _render_dashboard_view(df)

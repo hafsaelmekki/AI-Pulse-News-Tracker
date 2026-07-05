@@ -15,6 +15,8 @@ class Article:
     description: str | None
     url: str
     published_at: datetime
+    ai_relevance: bool
+    ai_relevance_reason: str
 
     def document_id(self) -> str:
         if self.url:
@@ -58,6 +60,8 @@ class AnalyzedArticle(Article):
             "summary": self.summary,
             "embedding": self.embedding,
             "embedding_model": self.embedding_model,
+            "ai_relevance": self.ai_relevance,
+            "ai_relevance_reason": self.ai_relevance_reason,
             "url": self.url,
             "date": self.published_at.isoformat(),
         }

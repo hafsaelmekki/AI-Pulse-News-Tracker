@@ -81,6 +81,8 @@ class SentimentClient:
                         description=article.description,
                         url=article.url,
                         published_at=article.published_at,
+                        ai_relevance=article.ai_relevance,
+                        ai_relevance_reason=article.ai_relevance_reason,
                         sentiment=result.sentiment,
                         confidence_pos=confidence_scores.positive,
                         confidence_neu=confidence_scores.neutral,

@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from ai_pulse_tracker.agent import (
     AI_PULSE_SYSTEM_PROMPT,
+    MAX_LLM_PAYLOAD_KB,
+    _payload_size_kb,
+    _protected_dashboard_payload,
+    answer_dashboard_question,
+    answer_important_articles_by_company,
     answer_question,
+    build_dashboard_llm_messages,
     build_llm_messages,
+    detect_dashboard_intent,
     is_conversation_prompt,
 )
 
@@ -31,6 +38,56 @@ def _results() -> list[dict]:
             "url": "https://example.com/rag",
         },
     ]
+
+
+def _dashboard_context() -> dict:
+    return {
+        "total_articles": 10,
+        "date_range": {"start": "2026-07-01", "end": "2026-07-05"},
+        "sentiment_distribution": [
+            {"sentiment": "neutral", "articles": 6},
+            {"sentiment": "positive", "articles": 3},
+            {"sentiment": "negative", "articles": 1},
+        ],
+        "average_importance_score": 81.2,
+        "dominant_sentiment": "neutral",
+        "top_companies": [
+            {"Company": "OpenAI", "Articles": 8, "Avg importance": 86.4, "Dominant sentiment": "Neutral"},
+            {"Company": "Google", "Articles": 6, "Avg importance": 78.1, "Dominant sentiment": "Positive"},
+        ],
+        "top_sources": [
+            {"Source": "AI News", "articles": 7, "Avg importance": 82.0},
+            {"Source": "Tech News", "articles": 3, "Avg importance": 75.0},
+        ],
+        "top_topics": [
+            {"topic": "AI Agents", "articles": 5, "avg_importance": 84.0},
+            {"topic": "RAG", "articles": 3, "avg_importance": 79.0},
+        ],
+        "top_important_articles": [
+            {
+                "title": "OpenAI launches important AI agent update",
+                "source": "AI News",
+                "summary": "OpenAI agent tools for enterprise workflows.",
+                "sentiment": "neutral",
+                "importance_score": 92.4,
+                "keywords": ["openai", "agents"],
+                "companies": ["OpenAI"],
+            },
+            {
+                "title": "Google Gemini expands enterprise AI deployment",
+                "source": "Tech News",
+                "summary": "Google Gemini adoption grows.",
+                "sentiment": "positive",
+                "importance_score": 88.1,
+                "keywords": ["google", "gemini"],
+                "companies": ["Google"],
+            },
+        ],
+        "negative_high_importance_articles": [],
+        "weak_signals": [
+            {"Topic": "AI Privacy", "Articles": 2, "Avg importance": "88.0"},
+        ],
+    }
 
 
 def test_answer_question_requires_llm_when_missing(monkeypatch):
@@ -72,7 +129,7 @@ def test_build_llm_messages_contains_article_context():
 
     assert messages[0]["role"] == "system"
     assert messages[0]["content"] == AI_PULSE_SYSTEM_PROMPT
-    assert "Cosmos DB articles -> retrieval -> structured article context -> LLM" in messages[0]["content"]
+    assert "AI dashboard analyst" in messages[0]["content"]
     assert "OpenAI launches agent tools" in messages[1]["content"]
     assert "Enterprise teams use AI agents to automate workflows." in messages[1]["content"]
     assert "Sentiment: positive" in messages[1]["content"]
@@ -93,3 +150,147 @@ def test_answer_question_appends_sources_to_llm_answer(monkeypatch):
     assert "### Sources used" in answer
     assert "Tech News" in answer
     assert "https://example.com/agents" in answer
+
+
+def test_detect_dashboard_intent_maps_dashboard_questions():
+    assert detect_dashboard_intent("What changed in sentiment over time?") == "sentiment"
+    assert detect_dashboard_intent("companies mentioned today") == "companies"
+    assert detect_dashboard_intent("most important articles") == "importance"
+    assert detect_dashboard_intent("weak signals") == "weak_signals"
+    assert detect_dashboard_intent("last week") == "follow_up"
+
+
+def test_build_dashboard_llm_messages_contains_dashboard_context():
+    context = {
+        "total_articles": 2,
+        "top_companies": [{"Company": "OpenAI", "Articles": 2}],
+    }
+    messages = build_dashboard_llm_messages(
+        "Which companies are most mentioned?",
+        context,
+        _results(),
+        intent="companies",
+    )
+
+    assert messages[0]["content"] == AI_PULSE_SYSTEM_PROMPT
+    assert "dashboard_context" in messages[1]["content"]
+    assert '"total_articles": 2' in messages[1]["content"]
+    assert "Retrieved article evidence" in messages[1]["content"]
+
+
+def test_answer_dashboard_question_uses_deterministic_company_answer(monkeypatch):
+    monkeypatch.delenv("AI_PULSE_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "ai_pulse_tracker.agent._try_generate_with_llm",
+        lambda messages: (_ for _ in ()).throw(AssertionError("LLM should not be called")),
+    )
+
+    answer = answer_dashboard_question(
+        "Which companies are most mentioned?",
+        _dashboard_context(),
+        [],
+        intent="companies",
+    )
+
+    assert "OpenAI" in answer
+    assert "8 articles" in answer
+    assert "LLM is required" not in answer
+
+
+def test_simple_dashboard_intents_do_not_call_llm(monkeypatch):
+    monkeypatch.setattr(
+        "ai_pulse_tracker.agent._try_generate_with_llm",
+        lambda messages: (_ for _ in ()).throw(AssertionError("LLM should not be called")),
+    )
+
+    cases = [
+        ("Which sources are most active?", "sources", "AI News"),
+        ("What is the sentiment distribution?", "sentiment", "neutral"),
+        ("Which articles are most important?", "importance", "OpenAI launches important AI agent update"),
+    ]
+    for question, intent, expected_text in cases:
+        answer = answer_dashboard_question(
+            question,
+            _dashboard_context(),
+            [],
+            intent=intent,
+        )
+        assert expected_text in answer
+        assert "LLM is required" not in answer
+
+
+def test_answer_important_articles_by_company_matches_top_companies():
+    answer = answer_important_articles_by_company(_dashboard_context())
+
+    assert "OpenAI launches important AI agent update" in answer
+    assert "Company: OpenAI" in answer
+    assert "Importance: 92.4/100" in answer
+    assert "Google Gemini expands enterprise AI deployment" in answer
+
+
+def test_answer_dashboard_question_falls_back_on_rate_limit(monkeypatch):
+    monkeypatch.setattr(
+        "ai_pulse_tracker.agent._try_generate_with_llm",
+        lambda messages: (_ for _ in ()).throw(
+            RuntimeError("LLM provider is rate-limited. Using deterministic AI Pulse fallback.")
+        ),
+    )
+
+    answer = answer_dashboard_question(
+        "What are the strongest AI Pulse trends?",
+        _dashboard_context(),
+        [],
+        intent="trends",
+    )
+
+    assert "AI Pulse trends" in answer
+    assert "AI Agents" in answer
+    assert "LLM is required" not in answer
+
+
+def test_protected_dashboard_payload_reduces_oversized_context():
+    huge_text = "OpenAI AI agents " + ("x" * 6000)
+    context = {
+        "total_articles": 20,
+        "date_range": {"start": "2026-07-01", "end": "2026-07-20"},
+        "sentiment_distribution": [{"sentiment": "positive", "articles": 12}],
+        "average_importance_score": 82.5,
+        "dominant_sentiment": "positive",
+        "top_important_articles": [
+            {
+                "title": huge_text,
+                "summary": huge_text,
+                "description": huge_text,
+                "url": "https://example.com/large",
+                "importance_score": 95.0,
+            }
+            for _ in range(5)
+        ],
+        "negative_high_importance_articles": [
+            {
+                "title": huge_text,
+                "summary": huge_text,
+                "description": huge_text,
+                "url": "https://example.com/large-negative",
+                "importance_score": 91.0,
+            }
+            for _ in range(5)
+        ],
+        "top_companies": [{"Company": "OpenAI", "Articles": 8}],
+        "top_sources": [{"Source": "AI News", "articles": 8}],
+        "top_topics": [{"topic": "AI Agents", "articles": 8}],
+    }
+
+    payload = _protected_dashboard_payload(
+        question="Which articles are most important?",
+        dashboard_context=context,
+        article_context=_results(),
+        intent="importance",
+    )
+
+    assert _payload_size_kb(payload) <= MAX_LLM_PAYLOAD_KB
+    articles = payload["dashboard_context"].get("top_important_articles", [])
+    assert len(articles) <= 3
+    assert all("url" not in article for article in articles)
+    assert all("description" not in article for article in articles)

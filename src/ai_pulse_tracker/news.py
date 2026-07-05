@@ -7,6 +7,7 @@ import requests
 
 from .config import Settings
 from .models import Article
+from .relevance import ai_relevance_reason
 
 LOGGER = logging.getLogger(__name__)
 MAX_NEWSAPI_PAGES = 5
@@ -67,11 +68,26 @@ class NewsClient:
             if payload.get("status") != "ok":
                 raise RuntimeError(f"NewsAPI responded with: {payload}")
 
+            entries = payload.get("articles", [])
             batch = []
-            for entry in payload.get("articles", []):
+            for entry in entries:
                 published_raw = entry.get("publishedAt") or datetime.utcnow().isoformat()
                 published_at = _parse_date(published_raw)
                 description = entry.get("description") or ""
+                relevance_reason = ai_relevance_reason(
+                    {
+                        "title": entry.get("title", ""),
+                        "description": description,
+                        "content": entry.get("content", ""),
+                    }
+                )
+                if not relevance_reason:
+                    LOGGER.debug(
+                        "Skipped non-AI article from %s: %s",
+                        entry.get("source", {}).get("name", "Unknown"),
+                        entry.get("title", "Untitled"),
+                    )
+                    continue
 
                 batch.append(
                     Article(
@@ -80,13 +96,15 @@ class NewsClient:
                         description=description,
                         url=entry.get("url", ""),
                         published_at=published_at,
+                        ai_relevance=True,
+                        ai_relevance_reason=relevance_reason,
                     )
                 )
 
             articles.extend(batch)
             LOGGER.debug("Fetched %s articles on page %s", len(batch), page)
 
-            if len(articles) >= desired_count or len(batch) < page_size:
+            if len(articles) >= desired_count or len(entries) < page_size:
                 break
 
         LOGGER.info("Fetched %s articles", min(len(articles), desired_count))

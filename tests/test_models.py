@@ -14,6 +14,8 @@ def _make_article() -> AnalyzedArticle:
         description="Desc",
         url="https://example.com",
         published_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        ai_relevance=True,
+        ai_relevance_reason="matched keyword: openai",
         sentiment="positive",
         confidence_pos=0.8,
         confidence_neu=0.15,
@@ -44,6 +46,8 @@ def test_to_cosmos_document_includes_id():
     assert doc["summary"] == "Sample summary"
     assert doc["embedding"] == [0.1, 0.2, 0.3]
     assert doc["embedding_model"] == "local-test"
+    assert doc["ai_relevance"] is True
+    assert doc["ai_relevance_reason"] == "matched keyword: openai"
 
 
 def test_partition_key_falls_back_to_source_when_url_missing():
