@@ -88,14 +88,12 @@ def _parse_since_text(value: str) -> datetime | None:
         return None
 
 
-def _time_filters() -> dict[str, timedelta | None]:
+def _date_filter_options() -> dict[str, timedelta | None]:
     return {
-        "Last 5 minutes": timedelta(minutes=5),
-        "Last 1 hour": timedelta(hours=1),
-        "Last 24 hours": timedelta(days=1),
-        "Last 7 days": timedelta(days=7),
-        "Last 30 days": timedelta(days=30),
-        "All time": None,
+        "Last week": timedelta(days=7),
+        "Last month": timedelta(days=30),
+        "Last year": timedelta(days=365),
+        "Range": None,
     }
 
 
@@ -1026,6 +1024,16 @@ def _normalize_date_range(value: object) -> tuple[object, object] | None:
     return None
 
 
+def _quick_date_range(
+    selected_filter: str,
+    max_date: object,
+) -> tuple[object, object] | None:
+    lookback = _date_filter_options().get(selected_filter)
+    if lookback is None:
+        return None
+    return max_date - lookback, max_date
+
+
 def _render_dashboard_view(df: pd.DataFrame) -> None:
     _render_dashboard_header(df)
 
@@ -1037,15 +1045,14 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
     max_importance = float(df["importance_score"].max()
                            ) if not df.empty else 0.0
     min_date, max_date = _date_bounds(df)
-    visual_min_date = min_date - timedelta(days=60)
+    visual_min_date = min_date - timedelta(days=365)
 
     col_date, col_sentiment, col_source, col_importance = st.columns(
         (1.2, 1, 1, 1))
-    selected_date_range = col_date.date_input(
-        "Date range",
-        value=(min_date, max_date),
-        min_value=visual_min_date,
-        max_value=max_date,
+    selected_date_filter = col_date.selectbox(
+        "Date filter",
+        list(_date_filter_options()),
+        index=1,
     )
     selected_sentiments = col_sentiment.multiselect(
         "Sentiment",
@@ -1064,11 +1071,21 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         value=0.0,
         step=5.0,
     )
+    if selected_date_filter == "Range":
+        selected_date_range = st.date_input(
+            "Custom date range",
+            value=(min_date, max_date),
+            min_value=visual_min_date,
+            max_value=max_date,
+        )
+        normalized_date_range = _normalize_date_range(selected_date_range)
+    else:
+        normalized_date_range = _quick_date_range(selected_date_filter, max_date)
+
     synthetic_fill = st.checkbox(
         "Fill missing dates for visual charts",
         value=True,
     )
-    normalized_date_range = _normalize_date_range(selected_date_range)
 
     filtered_df = _apply_filters(
         df,
