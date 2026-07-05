@@ -15,6 +15,26 @@ from .trends import count_keywords, format_keywords, normalize_keywords
 
 st.set_page_config(page_title="AI Pulse Tracker", layout="wide")
 PIPELINE_RESOURCE_KEY = "pipeline-v2"
+TRACKED_TOPICS = {
+    "AI Agents": ("ai agent", "ai agents", "agentic", "agents", "agent"),
+    "RAG": ("rag", "retrieval augmented", "retrieval"),
+    "OpenAI": ("openai", "chatgpt", "gpt-"),
+    "Microsoft": ("microsoft", "azure", "copilot"),
+    "Google": ("google", "gemini", "deepmind"),
+    "Azure": ("azure",),
+    "Regulation": ("regulation", "regulatory", "régulation", "reglementation"),
+    "Coding Agents": ("coding agent", "code agent", "developer agent", "github copilot"),
+}
+TRACKED_COMPANIES = {
+    "OpenAI": ("openai", "chatgpt", "gpt-"),
+    "Google": ("google", "gemini", "deepmind"),
+    "Microsoft": ("microsoft", "azure", "copilot"),
+    "Meta": ("meta", "llama"),
+    "Anthropic": ("anthropic", "claude"),
+    "Mistral AI": ("mistral", "mistral ai"),
+    "Nvidia": ("nvidia",),
+    "Apple": ("apple",),
+}
 
 
 @st.cache_resource(show_spinner=False)
@@ -69,32 +89,52 @@ def _time_filters() -> dict[str, timedelta | None]:
 
 def _apply_filters(
     df: pd.DataFrame,
-    timeframe_label: str,
     sentiments: list[str],
-    keywords: list[str],
+    sources: list[str],
+    topics: list[str],
     min_importance: float,
+    date_range: tuple[object, object] | None,
+    search_text: str,
 ) -> pd.DataFrame:
     filtered = df.copy()
-    filtered["date_dt"] = pd.to_datetime(filtered["date"], utc=True, errors="coerce")
-    window = _time_filters().get(timeframe_label)
-    if window is not None:
-        threshold = datetime.now(timezone.utc) - window
-        filtered = filtered[filtered["date_dt"] >= threshold]
+    filtered["date_dt"] = pd.to_datetime(
+        filtered["date"], utc=True, errors="coerce")
+    if date_range is not None:
+        start_date, end_date = date_range
+        start_dt = pd.Timestamp(start_date, tz="UTC")
+        end_dt = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+        filtered = filtered[
+            (filtered["date_dt"] >= start_dt) & (filtered["date_dt"] < end_dt)
+        ]
 
     if sentiments:
         filtered = filtered[filtered["sentiment"].isin(sentiments)]
 
+    if sources:
+        filtered = filtered[filtered["source"].isin(sources)]
+
     filtered = filtered[filtered["importance_score"] >= min_importance]
 
-    if keywords:
-        title_text = filtered["title"].fillna("").str.lower()
-        desc_text = filtered.get("description")
-        if desc_text is not None:
-            title_text = title_text + " " + desc_text.fillna("").str.lower()
-        keyword_text = filtered["keywords"].apply(lambda values: " ".join(values))
-        search_text = title_text + " " + keyword_text
-        mask = search_text.apply(lambda text: any(keyword in text for keyword in keywords))
+    if topics:
+        mask = filtered["topics"].apply(
+            lambda values: any(topic in values for topic in topics)
+        )
         filtered = filtered[mask]
+
+    search_text = search_text.strip().lower()
+    if search_text:
+        searchable = (
+            filtered["title"].fillna("").astype(str).str.lower()
+            + " "
+            + filtered["summary"].fillna("").astype(str).str.lower()
+            + " "
+            + filtered["description"].fillna("").astype(str).str.lower()
+            + " "
+            + filtered["keyword_text"].fillna("").astype(str).str.lower()
+            + " "
+            + filtered["source"].fillna("").astype(str).str.lower()
+        )
+        filtered = filtered[searchable.str.contains(search_text, regex=False)]
 
     return filtered.drop(columns=["date_dt"])
 
@@ -128,11 +168,54 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         errors="coerce",
     ).fillna(0.0)
     prepared["keyword_text"] = prepared["keywords"].apply(format_keywords)
+    prepared["topics"] = prepared.apply(_detect_topics, axis=1)
+    prepared["topic"] = prepared["topics"].apply(
+        lambda topics: topics[0] if topics else "Uncategorized"
+    )
     return prepared
 
 
 def _keyword_dataframe(df: pd.DataFrame, limit: int = 12) -> pd.DataFrame:
     return pd.DataFrame(count_keywords(df.to_dict("records"), limit=limit))
+
+
+def _detect_topics(row: pd.Series) -> list[str]:
+    text = _row_text(row)
+    topics = [
+        topic
+        for topic, aliases in TRACKED_TOPICS.items()
+        if any(alias in text for alias in aliases)
+    ]
+    if topics:
+        return topics
+
+    keywords = normalize_keywords(row.get("keywords"))
+    return [_title_case_topic(keyword) for keyword in keywords[:3]]
+
+
+def _detect_companies(row: pd.Series) -> list[str]:
+    text = _row_text(row)
+    return [
+        company
+        for company, aliases in TRACKED_COMPANIES.items()
+        if any(alias in text for alias in aliases)
+    ]
+
+
+def _row_text(row: pd.Series) -> str:
+    keywords = " ".join(normalize_keywords(row.get("keywords")))
+    return " ".join(
+        [
+            str(row.get("title", "")),
+            str(row.get("summary", "")),
+            str(row.get("description", "")),
+            keywords,
+        ]
+    ).lower()
+
+
+def _title_case_topic(value: str) -> str:
+    return value.replace("-", " ").replace("_", " ").title()
 
 
 def _confidence_score(row: object, key: str) -> float:
@@ -143,15 +226,20 @@ def _confidence_score(row: object, key: str) -> float:
 
 def _add_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
     scored = df.copy()
-    scored["pos_score"] = scored["confidence"].apply(
+    confidence = scored.get(
+        "confidence",
+        pd.Series([{} for _ in range(len(scored))], index=scored.index),
+    )
+    scored["pos_score"] = confidence.apply(
         lambda row: _confidence_score(row, "pos")
     )
-    scored["neu_score"] = scored["confidence"].apply(
+    scored["neu_score"] = confidence.apply(
         lambda row: _confidence_score(row, "neu")
     )
-    scored["neg_score"] = scored["confidence"].apply(
+    scored["neg_score"] = confidence.apply(
         lambda row: _confidence_score(row, "neg")
     )
+    scored["sentiment_score"] = scored["pos_score"] - scored["neg_score"]
     return scored
 
 
@@ -261,46 +349,134 @@ def _dominant_topic(df: pd.DataFrame) -> str:
 def _shorten_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
-    return value[: limit - 1].rstrip() + "…"
+    return value[: limit - 3].rstrip() + "..."
 
 
 def _render_trends(df: pd.DataFrame) -> None:
-    trend_col, source_col = st.columns(2)
-    with trend_col:
-        st.subheader("Top Keywords")
-        keyword_df = _keyword_dataframe(df)
-        if keyword_df.empty:
-            st.info("No keywords available yet. Ingest new articles to enrich the dataset.")
+    st.subheader("Trends & Topics")
+
+    topic_col, evolution_col = st.columns(2)
+    topic_df = _topic_counts_dataframe(df)
+    with topic_col:
+        st.markdown("**Top keywords / topics**")
+        if topic_df.empty:
+            st.info("No topics available yet.")
         else:
             st.plotly_chart(
                 px.bar(
-                    keyword_df,
-                    x="count",
-                    y="keyword",
+                    topic_df.head(12),
+                    x="articles",
+                    y="topic",
                     orientation="h",
-                    text="count",
-                ).update_layout(yaxis={"categoryorder": "total ascending"}),
+                    text="articles",
+                ).update_layout(
+                    yaxis={"categoryorder": "total ascending"},
+                    xaxis_title="Articles",
+                    yaxis_title="Topic",
+                ),
                 use_container_width=True,
             )
-    with source_col:
-        st.subheader("Source Coverage")
-        source_df = (
-            df.groupby("source", as_index=False)
-            .agg(articles=("title", "count"), avg_importance=("importance_score", "mean"))
-            .sort_values("articles", ascending=False)
-            .head(12)
+
+    with evolution_col:
+        st.markdown("**Topic evolution over time**")
+        evolution_df = _topic_evolution_dataframe(
+            df, topic_df.head(6)["topic"].tolist())
+        if evolution_df.empty:
+            st.info("Not enough dated topic data yet.")
+        else:
+            st.plotly_chart(
+                px.line(
+                    evolution_df,
+                    x="date",
+                    y="articles",
+                    color="topic",
+                    markers=True,
+                ).update_layout(
+                    xaxis_title="Date",
+                    yaxis_title="Articles",
+                ),
+                use_container_width=True,
+            )
+
+    weak_df = _weak_signals_dataframe(df)
+    st.markdown("**Weak signals to watch**")
+    if weak_df.empty:
+        st.info("No weak signal detected yet.")
+    else:
+        st.dataframe(weak_df, use_container_width=True, hide_index=True)
+
+
+def _topic_occurrences_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for _, article in df.iterrows():
+        topics = article.get("topics", [])
+        if not isinstance(topics, list):
+            topics = []
+        article_date = pd.to_datetime(
+            article.get("date"), utc=True, errors="coerce")
+        for topic in topics:
+            rows.append(
+                {
+                    "date": article_date.date() if not pd.isna(article_date) else None,
+                    "topic": topic,
+                    "importance_score": float(article.get("importance_score", 0.0) or 0.0),
+                    "sentiment": str(article.get("sentiment", "")).lower(),
+                    "title": str(article.get("title", "")),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _topic_counts_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    occurrences = _topic_occurrences_dataframe(df)
+    if occurrences.empty:
+        return pd.DataFrame(columns=["topic", "articles", "avg_importance"])
+    return (
+        occurrences.groupby("topic", as_index=False)
+        .agg(
+            articles=("title", "count"),
+            avg_importance=("importance_score", "mean"),
         )
-        st.plotly_chart(
-            px.bar(
-                source_df,
-                x="articles",
-                y="source",
-                orientation="h",
-                color="avg_importance",
-                color_continuous_scale="Blues",
-            ).update_layout(yaxis={"categoryorder": "total ascending"}),
-            use_container_width=True,
-        )
+        .sort_values(["articles", "avg_importance"], ascending=False)
+    )
+
+
+def _topic_evolution_dataframe(df: pd.DataFrame, topics: list[str]) -> pd.DataFrame:
+    occurrences = _topic_occurrences_dataframe(df)
+    if occurrences.empty or not topics:
+        return pd.DataFrame(columns=["date", "topic", "articles"])
+    occurrences = occurrences[
+        occurrences["topic"].isin(topics) & occurrences["date"].notna()
+    ]
+    if occurrences.empty:
+        return pd.DataFrame(columns=["date", "topic", "articles"])
+    return (
+        occurrences.groupby(["date", "topic"], as_index=False)
+        .agg(articles=("title", "count"))
+        .sort_values("date")
+    )
+
+
+def _weak_signals_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    topic_df = _topic_counts_dataframe(df)
+    if topic_df.empty:
+        return pd.DataFrame(columns=["Topic", "Articles", "Avg importance", "Signal"])
+
+    weak_df = topic_df[
+        (topic_df["articles"] <= 3) & (topic_df["avg_importance"] >= 70)
+    ].copy()
+    if weak_df.empty:
+        return pd.DataFrame(columns=["Topic", "Articles", "Avg importance", "Signal"])
+
+    weak_df = weak_df.sort_values("avg_importance", ascending=False).head(6)
+    return pd.DataFrame(
+        {
+            "Topic": weak_df["topic"],
+            "Articles": weak_df["articles"].astype(int),
+            "Avg importance": weak_df["avg_importance"].map(lambda score: f"{score:.1f}"),
+            "Signal": "Low frequency, high importance",
+        }
+    )
 
 
 def _render_sentiment_analysis(df: pd.DataFrame) -> None:
@@ -370,7 +546,8 @@ def _sentiment_distribution_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 def _daily_sentiment_score_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     trend_df = df.copy()
-    trend_df["date"] = pd.to_datetime(trend_df["date"], utc=True, errors="coerce")
+    trend_df["date"] = pd.to_datetime(
+        trend_df["date"], utc=True, errors="coerce")
     trend_df["sentiment_score"] = (
         trend_df["sentiment"]
         .fillna("")
@@ -407,6 +584,219 @@ def _sentiment_trend_insight(daily_score_df: pd.DataFrame) -> str | None:
     if delta >= 0.2:
         return "Signal: sentiment has become more positive over the latest available days."
     return "Signal: sentiment is broadly stable over the latest available days."
+
+
+def _render_importance_analysis(df: pd.DataFrame) -> None:
+    st.subheader("Article Importance")
+
+    top_col, distribution_col = st.columns((1.4, 1))
+    with top_col:
+        st.markdown("**Top 5 most important articles**")
+        top_articles = _top_importance_articles(df)
+        if top_articles.empty:
+            st.info("No importance scores available yet.")
+        else:
+            st.dataframe(top_articles, use_container_width=True,
+                         hide_index=True)
+
+    with distribution_col:
+        st.markdown("**Importance score distribution**")
+        distribution_df = _importance_distribution_dataframe(df)
+        st.plotly_chart(
+            px.bar(
+                distribution_df,
+                x="bucket",
+                y="articles",
+                text="articles",
+                color="bucket",
+                color_discrete_sequence=px.colors.sequential.Blues[2:],
+            ).update_layout(
+                xaxis_title="Importance score",
+                yaxis_title="Articles",
+                showlegend=False,
+            ),
+            use_container_width=True,
+        )
+
+    st.markdown("**Sentiment vs importance**")
+    st.plotly_chart(
+        px.scatter(
+            df,
+            x="importance_score",
+            y="sentiment_score",
+            color="sentiment",
+            hover_data=["title", "source", "date"],
+            color_discrete_map={
+                "positive": "#00CC96",
+                "neutral": "#636EFA",
+                "negative": "#EF553B",
+            },
+        ).update_layout(
+            xaxis_title="Importance score",
+            yaxis_title="Sentiment score",
+        ),
+        use_container_width=True,
+    )
+
+
+def _top_importance_articles(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(
+            columns=["Title", "Source", "Date",
+                     "Sentiment", "Importance", "URL"]
+        )
+
+    top_df = df.sort_values("importance_score", ascending=False).head(5).copy()
+    return pd.DataFrame(
+        {
+            "Title": top_df["title"].fillna("").astype(str),
+            "Source": top_df["source"].fillna("").astype(str),
+            "Date": top_df["date"].fillna("").astype(str),
+            "Sentiment": top_df["sentiment"].fillna("").astype(str).str.capitalize(),
+            "Importance": top_df["importance_score"].map(lambda score: f"{score:.1f}"),
+            "URL": top_df["url"].fillna("").astype(str),
+        }
+    )
+
+
+def _importance_distribution_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    buckets = ["0-20", "20-40", "40-60", "60-80", "80-100"]
+    scores = pd.to_numeric(df["importance_score"], errors="coerce").fillna(0.0)
+    bucket_series = pd.cut(
+        scores,
+        bins=[0, 20, 40, 60, 80, 100],
+        labels=buckets,
+        include_lowest=True,
+        right=True,
+    )
+    counts = bucket_series.value_counts().reindex(buckets, fill_value=0)
+    return pd.DataFrame({"bucket": buckets, "articles": counts.astype(int).tolist()})
+
+
+def _render_sources_companies(df: pd.DataFrame) -> None:
+    st.subheader("Sources & Companies")
+
+    source_col, company_col = st.columns(2)
+    source_df = _source_strategy_dataframe(df)
+    with source_col:
+        st.markdown("**Most active sources**")
+        if source_df.empty:
+            st.info("No source data available yet.")
+        else:
+            st.plotly_chart(
+                px.bar(
+                    source_df.head(10),
+                    x="articles",
+                    y="Source",
+                    orientation="h",
+                    color="Avg importance",
+                    color_continuous_scale="Blues",
+                ).update_layout(
+                    yaxis={"categoryorder": "total ascending"},
+                    xaxis_title="Articles",
+                    yaxis_title="Source",
+                ),
+                use_container_width=True,
+            )
+            st.dataframe(source_df, use_container_width=True, hide_index=True)
+
+    company_df = _company_strategy_dataframe(df)
+    with company_col:
+        st.markdown("**Most mentioned companies**")
+        if company_df.empty:
+            st.info("No tracked company mentions detected yet.")
+        else:
+            st.plotly_chart(
+                px.bar(
+                    company_df.head(10),
+                    x="Articles",
+                    y="Company",
+                    orientation="h",
+                    color="Avg importance",
+                    color_continuous_scale="Purples",
+                ).update_layout(
+                    yaxis={"categoryorder": "total ascending"},
+                    xaxis_title="Articles",
+                    yaxis_title="Company",
+                ),
+                use_container_width=True,
+            )
+            st.dataframe(company_df, use_container_width=True, hide_index=True)
+
+
+def _source_strategy_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(
+            columns=["Source", "articles", "Avg sentiment", "Avg importance"]
+        )
+
+    source_df = (
+        df.groupby("source", as_index=False)
+        .agg(
+            articles=("title", "count"),
+            avg_sentiment=("sentiment_score", "mean"),
+            avg_importance=("importance_score", "mean"),
+        )
+        .sort_values("articles", ascending=False)
+    )
+    return pd.DataFrame(
+        {
+            "Source": source_df["source"],
+            "articles": source_df["articles"].astype(int),
+            "Avg sentiment": source_df["avg_sentiment"].map(lambda score: f"{score:+.2f}"),
+            "Avg importance": source_df["avg_importance"].round(1),
+        }
+    )
+
+
+def _company_mentions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for _, article in df.iterrows():
+        for company in _detect_companies(article):
+            rows.append(
+                {
+                    "company": company,
+                    "title": str(article.get("title", "")),
+                    "sentiment": str(article.get("sentiment", "")).lower(),
+                    "importance_score": float(article.get("importance_score", 0.0) or 0.0),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _company_strategy_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    mentions = _company_mentions_dataframe(df)
+    if mentions.empty:
+        return pd.DataFrame(
+            columns=["Company", "Articles",
+                     "Dominant sentiment", "Avg importance"]
+        )
+
+    grouped = (
+        mentions.groupby("company", as_index=False)
+        .agg(
+            articles=("title", "count"),
+            avg_importance=("importance_score", "mean"),
+            dominant_sentiment=("sentiment", _dominant_sentiment_value),
+        )
+        .sort_values(["articles", "avg_importance"], ascending=False)
+    )
+    return pd.DataFrame(
+        {
+            "Company": grouped["company"],
+            "Articles": grouped["articles"].astype(int),
+            "Dominant sentiment": grouped["dominant_sentiment"].str.capitalize(),
+            "Avg importance": grouped["avg_importance"].round(1),
+        }
+    )
+
+
+def _dominant_sentiment_value(values: pd.Series) -> str:
+    values = values.fillna("").astype(str)
+    values = values[values != ""]
+    if values.empty:
+        return "unknown"
+    return str(values.value_counts().idxmax())
 
 
 def _render_evidence(search_results: list[dict[str, object]]) -> None:
@@ -480,89 +870,91 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
 
 
 def _render_articles(df: pd.DataFrame) -> None:
-    article_columns = [
-        "date",
-        "source",
-        "title",
-        "summary",
-        "sentiment",
-        "importance_score",
-        "keyword_text",
-        "url",
-    ]
+    st.subheader("Article Explorer")
 
-    st.subheader("High Importance Articles")
-    st.dataframe(
-        df.sort_values("importance_score", ascending=False)[article_columns].head(20),
-        use_container_width=True,
+    explorer_df = pd.DataFrame(
+        {
+            "Date": df["date"].fillna("").astype(str),
+            "Title": df["title"].fillna("").astype(str),
+            "Source": df["source"].fillna("").astype(str),
+            "Topic": df["topic"].fillna("").astype(str),
+            "Sentiment": df["sentiment"].fillna("").astype(str).str.capitalize(),
+            "Sentiment score": df["sentiment_score"].round(2),
+            "Importance score": df["importance_score"].round(1),
+            "URL": df["url"].fillna("").astype(str),
+            "Summary": df["summary"].fillna("").astype(str),
+        }
     )
-
-    st.subheader("Latest Articles")
-    st.dataframe(
-        df[article_columns],
-        use_container_width=True,
-    )
+    st.dataframe(explorer_df, use_container_width=True, hide_index=True)
 
 
-def _render_ingestion_controls() -> str | None:
-    status_message: str | None = None
+def _render_dashboard_header(df: pd.DataFrame) -> None:
+    date_series = pd.to_datetime(
+        df["date"], utc=True, errors="coerce").dropna()
+    if date_series.empty:
+        st.caption("Last update: unknown")
+        return
+    last_update = date_series.max().strftime("%Y-%m-%d %H:%M UTC")
+    st.caption(f"Last update: {last_update}")
 
-    with st.expander("Data ingestion controls", expanded=False):
-        query_override = st.text_input(
-            "Override NewsAPI query",
-            placeholder="Generative AI",
-            help="Leave empty to use the default configured query.",
-        )
-        since_text = st.text_input(
-            "Fetch articles published after (ISO8601)",
-            placeholder="2024-04-01T08:00:00Z",
-        )
-        full_refresh = st.checkbox(
-            "Ignore incremental cursor",
-            help="Refetch even if articles already ingested.",
-        )
-        refresh_clicked = st.button("Refresh data cache", key="refresh-cache")
-        fetch_clicked = st.button(
-            "Ingest latest articles", type="primary", key="fetch-latest"
-        )
 
-    since_override = _parse_since_text(since_text)
+def _date_bounds(df: pd.DataFrame) -> tuple[object, object]:
+    date_series = pd.to_datetime(
+        df["date"], utc=True, errors="coerce").dropna()
+    if date_series.empty:
+        today = datetime.now(timezone.utc).date()
+        return today, today
+    return date_series.min().date(), date_series.max().date()
 
-    if fetch_clicked:
-        with st.spinner("Contacting NewsAPI + Azure AI..."):
-            raw_result = get_pipeline(PIPELINE_RESOURCE_KEY).run(
-                query=query_override or None,
-                after=since_override,
-                incremental=not full_refresh and since_override is None,
-            )
-        result = _ensure_upsert_result(raw_result)
-        load_dataframe.clear()
-        status_message = (
-            f"Ingested {result.created} new / {result.updated} refreshed "
-            f"at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}."
-        )
-    elif refresh_clicked:
-        load_dataframe.clear()
 
-    return status_message
+def _normalize_date_range(value: object) -> tuple[object, object] | None:
+    if isinstance(value, tuple) and len(value) == 2:
+        return value[0], value[1]
+    if isinstance(value, list) and len(value) == 2:
+        return value[0], value[1]
+    return None
+
+
+def _available_topics(df: pd.DataFrame) -> list[str]:
+    topics: set[str] = set()
+    for values in df["topics"]:
+        if isinstance(values, list):
+            topics.update(str(value) for value in values if str(value).strip())
+    return sorted(topics)
 
 
 def _render_dashboard_view(df: pd.DataFrame) -> None:
+    _render_dashboard_header(df)
     _render_kpi_cards(df)
     st.divider()
 
-    st.subheader("Filters")
+    st.subheader("Global Filters")
     sentiments_available = sorted(df["sentiment"].dropna().unique().tolist())
-    time_labels = list(_time_filters().keys())
-    max_importance = float(df["importance_score"].max()) if not df.empty else 0.0
-    col_time, col_sentiment, col_importance, col_topics = st.columns((1, 1, 1, 1.2))
-    timeframe_label = col_time.selectbox(
-        "Time window", time_labels, index=len(time_labels) - 1
+    sources_available = sorted(df["source"].fillna(
+        "").astype(str).unique().tolist())
+    sources_available = [source for source in sources_available if source]
+    topics_available = _available_topics(df)
+    max_importance = float(df["importance_score"].max()
+                           ) if not df.empty else 0.0
+    min_date, max_date = _date_bounds(df)
+
+    col_date, col_sentiment, col_source, col_importance = st.columns(
+        (1.2, 1, 1, 1))
+    selected_date_range = col_date.date_input(
+        "Date range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date,
     )
     selected_sentiments = col_sentiment.multiselect(
         "Sentiment",
         sentiments_available,
         default=sentiments_available,
+    )
+    selected_sources = col_source.multiselect(
+        "Source",
+        sources_available,
+        default=sources_available,
     )
     min_importance = col_importance.slider(
         "Min importance",
@@ -571,18 +963,26 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         value=0.0,
         step=5.0,
     )
-    topics_input = col_topics.text_input(
-        "Topics (comma-separated keywords)",
-        placeholder="openai, regulation, healthcare",
+
+    col_topic, col_search = st.columns((1.2, 1.8))
+    selected_topics = col_topic.multiselect(
+        "Topic",
+        topics_available,
+        default=[],
     )
-    keywords = [word.strip().lower() for word in topics_input.split(",") if word.strip()]
+    search_text = col_search.text_input(
+        "Keyword search",
+        placeholder="OpenAI, benchmark, cost optimization...",
+    )
 
     filtered_df = _apply_filters(
         df,
-        timeframe_label,
         selected_sentiments,
-        keywords,
+        selected_sources,
+        selected_topics,
         min_importance,
+        _normalize_date_range(selected_date_range),
+        search_text,
     )
 
     if filtered_df.empty:
@@ -594,7 +994,11 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
     st.divider()
     _render_sentiment_analysis(filtered_df)
     st.divider()
+    _render_importance_analysis(filtered_df)
+    st.divider()
     _render_trends(filtered_df)
+    st.divider()
+    _render_sources_companies(filtered_df)
     st.divider()
     _render_articles(filtered_df)
 
@@ -605,19 +1009,14 @@ def render_dashboard() -> None:
 
     selected_section = _render_project_menu()
 
-    status_message = None
-    if selected_section == "Dashboard":
-        status_message = _render_ingestion_controls()
-
     df = load_dataframe()
-    if status_message:
-        st.success(status_message)
 
     if df.empty:
         if selected_section == "Assistant":
             _render_ai_assistant(pd.DataFrame())
         else:
-            st.warning("No documents found in Cosmos DB. Run the ingestion pipeline first.")
+            st.warning(
+                "No documents found in Cosmos DB. Run the ingestion pipeline first.")
         return
 
     df = _prepare_dataframe(df)

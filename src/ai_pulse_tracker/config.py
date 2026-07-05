@@ -22,7 +22,7 @@ class Settings:
     cosmos_key: str
     database_name: str = "NewsDatabase"
     container_name: str = "Analyses"
-    news_query: str = "Generative AI"
+    news_query: str = '("Generative AI" OR ChatGPT OR OpenAI OR LLM OR "AI agents" OR RAG OR Gemini OR Copilot OR Mistral)'
     news_language: str = "fr"
     news_batch_size: int = 50
     news_max_lookback_days: int = 29
@@ -66,7 +66,8 @@ def load_settings(dotenv_path: str | os.PathLike[str] | None = None) -> Settings
         cosmos_key=env["COSMOS_KEY"],
         database_name=env.get("COSMOS_DATABASE", "NewsDatabase"),
         container_name=env.get("COSMOS_CONTAINER", "Analyses"),
-        news_query=env.get("NEWS_QUERY", "Generative AI"),
+        news_query=env.get(
+            "NEWS_QUERY", '("Generative AI" OR ChatGPT OR OpenAI OR LLM OR "AI agents" OR RAG OR Gemini OR Copilot OR Mistral)'),
         news_language=env.get("NEWS_LANGUAGE", "fr"),
         news_batch_size=int(env.get("NEWS_BATCH_SIZE", 50)),
         news_max_lookback_days=int(env.get("NEWS_MAX_LOOKBACK_DAYS", 29)),
