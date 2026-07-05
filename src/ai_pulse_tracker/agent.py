@@ -13,28 +13,50 @@ from .trends import normalize_keywords
 
 
 AI_PULSE_SYSTEM_PROMPT = """
-You are AI Pulse, an AI dashboard analyst.
+You are AI Pulse, a RAG-powered AI dashboard analyst.
 
-Your role is to analyze the dashboard data produced by AI Pulse.
-You help users understand AI trends, sentiment evolution, important articles,
-most mentioned companies, sources, risks, opportunities, and weak signals.
+Your role is to analyze the AI Pulse dashboard and explain the news signals behind the numbers.
+
+You have two sources of truth:
+1. dashboard_context:
+   - aggregated metrics
+   - sentiment distribution
+   - companies
+   - sources
+   - importance scores
+   - trends over time
+   - weak signals
+
+2. retrieved_evidence:
+   - articles retrieved from the database
+   - each article has a citation id such as [1], [2], [3]
 
 Rules:
-- Use dashboard_context first.
-- Use retrieved articles only as evidence or examples.
-- Stay strictly inside AI Pulse dashboard data and retrieved AI Pulse articles.
-- If the user asks about an unrelated topic, politely say you can only analyze AI Pulse data.
+- Use dashboard_context for all numerical statements.
+- Use retrieved_evidence to justify and illustrate the analysis.
 - Do not invent numbers.
+- Do not invent sources.
 - Do not invent articles.
-- If the dashboard data is insufficient, say it clearly.
+- Do not cite an article unless it is present in retrieved_evidence.
+- Do not simply list articles.
+- Always synthesize.
+- Answer in the same language as the user.
+- If the question is in French, answer fully in French.
+- If the question is in English, answer fully in English.
 - Stay inside the AI / Generative AI scope.
-- Ignore unrelated articles.
-- Do not behave like a search engine.
-- Do not simply list article titles.
-- Give analytical insights.
-- Mention relevant numbers from the dashboard.
-- Answer in the configured assistant language from the prompt.
+- If some retrieved articles are weak or only indirectly relevant, say so clearly.
 - Never confuse sentiment label with importance_score.
+- Sentiment is a label: positive, neutral, negative or mixed.
+- Importance score is a priority score from 0 to 100.
+- Be detailed, but structured.
+- Use citations like [1], [2], [3] after claims supported by retrieved articles.
+
+Answer format for analytical questions:
+1. Résumé exécutif / Executive summary
+2. Analyse détaillée / Detailed analysis
+3. Ce que cela signifie / What it means
+4. Articles de référence / Evidence articles
+5. Limites éventuelles / Limitations, only if useful
 """.strip()
 
 LLM_TIMEOUT_SECONDS = 20
@@ -44,6 +66,8 @@ MAX_LLM_PAYLOAD_KB = 28.0
 EVIDENCE_TEXT_LIMIT = 220
 
 CONVERSATION_STARTERS = {
+    "bjr",
+    "bonjou",
     "hello",
     "hey",
     "hi",
@@ -51,6 +75,18 @@ CONVERSATION_STARTERS = {
     "bonsoir",
     "salut",
     "coucou",
+}
+
+CASUAL_CONVERSATION_PHRASES = {
+    "ca va",
+    "ça va",
+    "comment ca va",
+    "comment ça va",
+    "how are you",
+    "how is it going",
+    "merci",
+    "thanks",
+    "thank you",
 }
 
 META_PROMPTS = {
@@ -137,12 +173,11 @@ TEMPORAL_FOLLOW_UP_TERMS = (
 
 
 def is_conversation_prompt(question: str) -> bool:
-    normalized = question.strip().lower()
+    normalized = _normalize_question(question)
     if not normalized:
         return True
 
-    first_word = normalized.replace(",", " ").replace("!", " ").split(maxsplit=1)[0]
-    if first_word in CONVERSATION_STARTERS:
+    if _is_greeting_or_casual(normalized):
         return True
     if any(phrase in normalized for phrase in META_PROMPTS):
         return True
@@ -219,8 +254,7 @@ def detect_language_change_request(question: str) -> str | None:
 
 
 def answer_conversation(question: str, language: str | None = None) -> str:
-    normalized = question.strip().lower()
-    first_word = normalized.replace(",", " ").replace("!", " ").split(maxsplit=1)[0]
+    normalized = _normalize_question(question)
     target_language = language or detect_language_change_request(question) or _answer_language(question)
     requested_language = detect_language_change_request(question)
     if requested_language == "en":
@@ -235,20 +269,16 @@ def answer_conversation(question: str, language: str | None = None) -> str:
             "Je reste concentré uniquement sur AI Pulse : tendances du dashboard, RAG, "
             "agents IA, companies, sources, sentiment, articles importants et signaux faibles."
         )
-    if not normalized or first_word in CONVERSATION_STARTERS:
+    if not normalized or _is_greeting_or_casual(normalized):
         return _localized(
             target_language,
             (
-                "Hey Hafsa. I am your AI Pulse assistant. "
-                "I can analyze AI trends, companies, sources, sentiment, "
-                "article importance, and dashboard weak signals. "
-                "Choose a question below or ask your own."
+                "Hi Hafsa — I’m here. Ask me about AI Pulse trends, companies, "
+                "sentiment, sources, important articles, or weak signals."
             ),
             (
-                "Hey Hafsa. Je suis ton assistant AI Pulse. "
-                "Je peux analyser les tendances IA, les companies, les sources, "
-                "le sentiment, l'importance des articles et les signaux faibles du dashboard. "
-                "Choisis une question ci-dessous ou pose ta propre question."
+                "Bonjour Hafsa — ça va. Pose-moi une question sur AI Pulse : "
+                "tendances, companies, sentiment, sources, articles importants ou signaux faibles."
             ),
         )
     return _localized(
@@ -299,19 +329,10 @@ def answer_dashboard_question(
     intent: str,
     language: str | None = None,
 ) -> str:
-    deterministic_answer = _deterministic_dashboard_answer(
-        question,
-        dashboard_context,
-        intent=intent,
-        language=language,
-    )
-    if deterministic_answer:
-        return deterministic_answer
-
     messages = build_dashboard_llm_messages(
         question,
         dashboard_context,
-        _article_context(retrieved_articles),
+        retrieved_articles,
         intent=intent,
         language=language,
     )
@@ -325,7 +346,7 @@ def answer_dashboard_question(
             error=str(exc),
             language=language,
         )
-    return _ensure_source_appendix(llm_answer, retrieved_articles)
+    return _ensure_source_appendix(llm_answer, retrieved_articles, language=language or "en")
 
 
 def answer_important_articles_by_company(
@@ -362,31 +383,96 @@ def answer_important_articles_by_company(
             "Aucun article important AI Pulse ne mentionne explicitement les principales companies du dashboard.",
         )
 
-    header = _localized(
+    top_match = matches[0]
+    summary = _localized(
         language,
-        "Here are the most important articles mentioning the main companies in the dashboard:",
-        "Voici les articles les plus importants qui mentionnent les principales companies du dashboard :",
+        (
+            "The strongest important-article signal is linked to "
+            f"{top_match.get('matched_company', 'the main companies')}."
+        ),
+        (
+            "Le signal le plus important côté articles est lié à "
+            f"{top_match.get('matched_company', 'les principales companies')}."
+        ),
     )
-    lines = [header, ""]
-    for index, article in enumerate(matches[:5], start=1):
+    insights: list[str] = []
+    key_numbers = _base_key_numbers(dashboard_context, language)
+    for article in matches[:5]:
         title = str(article.get("title", "Untitled article")).strip() or "Untitled article"
-        lines.extend(
-            [
-                f"{index}. {title}",
-                f"- Company: {article.get('matched_company', 'unknown')}",
-                f"- Source: {article.get('source', 'Unknown source')}",
-                f"- Sentiment: {article.get('sentiment', 'unknown')}",
-                f"- Importance: {_format_importance(article.get('importance_score'))}/100",
-                "",
-            ]
+        insights.append(
+            f"{title} — {article.get('matched_company', 'unknown')}, "
+            f"{article.get('source', 'Unknown source')}, "
+            f"sentiment {article.get('sentiment', 'unknown')}, "
+            f"importance {_format_importance(article.get('importance_score'))}/100."
         )
-    return "\n".join(lines).strip()
+    key_numbers.append(
+        _localized(
+            language,
+            f"Matched important articles: {len(matches[:5])}",
+            f"Articles importants détectés : {len(matches[:5])}",
+        )
+    )
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=key_numbers,
+        sources=_source_names_from_articles(matches),
+    )
+
+
+def build_retrieved_evidence(
+    retrieved_articles: list[Mapping[str, Any]],
+    max_articles: int = 6,
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for index, article in enumerate(retrieved_articles[: max(1, max_articles)], start=1):
+        topics = _article_topics_or_keywords(article)
+        evidence.append(
+            {
+                "citation_id": f"[{index}]",
+                "title": _truncate_text(article.get("title") or "Untitled article", 180),
+                "source": _truncate_text(article.get("source") or "Unknown source", 120),
+                "published_at": _truncate_text(
+                    article.get("published_at") or article.get("date") or "",
+                    80,
+                ),
+                "url": _truncate_text(article.get("url") or "", 300),
+                "sentiment": _truncate_text(article.get("sentiment") or "unknown", 40),
+                "importance_score": _format_importance(article.get("importance_score")),
+                "companies": _article_companies(article),
+                "topics": topics,
+                "keywords": topics,
+                "short_summary": _truncate_text(
+                    article.get("summary") or article.get("description") or "",
+                    400,
+                ),
+            }
+        )
+    return evidence
+
+
+def build_hybrid_assistant_context(
+    question: str,
+    dashboard_context: Mapping[str, Any],
+    retrieved_articles: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "question": question,
+        "dashboard_context": dict(dashboard_context),
+        "retrieved_evidence": build_retrieved_evidence(retrieved_articles),
+        "instructions": (
+            "Use dashboard_context for quantitative claims and retrieved_evidence "
+            "for source-backed explanations."
+        ),
+    }
 
 
 def build_dashboard_llm_messages(
     question: str,
     dashboard_context: Mapping[str, Any],
-    article_context: list[Mapping[str, Any]],
+    retrieved_articles: list[Mapping[str, Any]],
     *,
     intent: str,
     language: str | None = None,
@@ -394,19 +480,14 @@ def build_dashboard_llm_messages(
     payload = _protected_dashboard_payload(
         question=question,
         dashboard_context=dashboard_context,
-        article_context=article_context,
+        retrieved_articles=retrieved_articles,
         intent=intent,
+        language=language,
     )
     target_language = language or _answer_language(question)
     language_name = "French" if target_language == "fr" else "English"
     context_json = json.dumps(
-        payload["dashboard_context"],
-        ensure_ascii=False,
-        indent=2,
-        default=str,
-    )
-    evidence_json = json.dumps(
-        payload["retrieved_evidence"],
+        payload,
         ensure_ascii=False,
         indent=2,
         default=str,
@@ -417,18 +498,21 @@ def build_dashboard_llm_messages(
             f"Answer language: {language_name}",
             f"Payload size: {payload['payload_size_kb']:.1f} KB",
             "",
-            "dashboard_context:",
+            "hybrid_assistant_context:",
             context_json,
-            "",
-            "Retrieved article evidence:",
-            evidence_json,
             "",
             f"User question: {question}",
             "",
             (
-                "Answer as an AI Pulse dashboard analyst. Start from dashboard_context "
-                "numbers, then use retrieved evidence only to illustrate the analysis. "
-                f"Write the entire answer in {language_name}."
+                "Produce a detailed RAG-style analytical answer. Use dashboard_context "
+                "first for metrics and retrieved_evidence for citations. "
+                f"Write the entire answer in {language_name}. Mention that the answer "
+                "is based on the current dashboard filters or selected date range. "
+                "For trends, identify 3 to 5 trends when possible. For companies, "
+                "compare visibility, average importance and dominant sentiment. "
+                "For sentiment, explain distribution and drivers. For important articles, "
+                "rank by importance_score. For weak signals, explain low-volume but "
+                "high-importance signals. End with evidence articles and citation ids."
             ),
         ]
     )
@@ -476,12 +560,30 @@ def _fallback_dashboard_answer(
         language=language,
     )
     if deterministic:
-        return deterministic
+        return _prepend_unavailable_llm_notice(deterministic, language)
     if intent == "weak_signals":
-        return _answer_weak_signals(dashboard_context, language, error)
+        return _prepend_unavailable_llm_notice(
+            _answer_weak_signals(dashboard_context, language, error),
+            language,
+        )
     if intent == "trends":
-        return _answer_trends(dashboard_context, language, error)
-    return _answer_general_summary(dashboard_context, language, error)
+        return _prepend_unavailable_llm_notice(
+            _answer_trends(dashboard_context, language, error),
+            language,
+        )
+    return _prepend_unavailable_llm_notice(
+        _answer_general_summary(dashboard_context, language, error),
+        language,
+    )
+
+
+def _prepend_unavailable_llm_notice(answer: str, language: str) -> str:
+    notice = _localized(
+        language,
+        "Generative RAG synthesis is temporarily unavailable, so this is a dashboard-based fallback.",
+        "La synthèse RAG générative est temporairement indisponible ; voici une réponse basée sur le dashboard.",
+    )
+    return f"{notice}\n\n{answer}"
 
 
 def _answer_companies(dashboard_context: Mapping[str, Any], language: str) -> str:
@@ -492,31 +594,37 @@ def _answer_companies(dashboard_context: Mapping[str, Any], language: str) -> st
             "I do not have enough AI Pulse company data to answer this.",
             "Je n’ai pas assez de données company dans AI Pulse pour répondre.",
         )
-    lines = [
-        _localized(
-            language,
-            "The most mentioned companies in the current AI Pulse dashboard are:",
-            "Les companies les plus mentionnées dans le dashboard AI Pulse sont :",
-        )
-    ]
-    for company in companies:
+    strongest = companies[0]
+    strongest_name = strongest.get("Company") or strongest.get("company") or "the top company"
+    summary = _localized(
+        language,
+        f"{strongest_name} is the strongest company signal in the current dashboard context.",
+        f"{strongest_name} est le signal company le plus fort dans le contexte dashboard actuel.",
+    )
+    insights: list[str] = []
+    for company in companies[:3]:
         name = company.get("Company") or company.get("company") or "Unknown"
         articles = company.get("Articles") or company.get("articles") or 0
         avg_importance = company.get("Avg importance") or company.get("avg_importance") or "unknown"
         sentiment = company.get("Dominant sentiment") or company.get("dominant_sentiment") or "unknown"
-        lines.append(
-            f"- {name}: {articles} articles, average importance {avg_importance}, dominant sentiment {sentiment}."
+        insights.append(
+            f"{name}: {articles} articles, average importance {avg_importance}, dominant sentiment {sentiment}."
         )
-    strongest = companies[0]
-    strongest_name = strongest.get("Company") or strongest.get("company") or "the top company"
-    lines.append(
+    key_numbers = _base_key_numbers(dashboard_context, language)
+    key_numbers.append(
         _localized(
             language,
-            f"{strongest_name} is the strongest company signal because it has the highest mention count in the dashboard.",
-            f"{strongest_name} est le signal company le plus fort car il a le plus grand nombre de mentions dans le dashboard.",
+            f"Companies tracked in top list: {len(companies)}",
+            f"Companies dans le top : {len(companies)}",
         )
     )
-    return "\n".join(lines)
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=key_numbers,
+    )
 
 
 def _answer_sources(dashboard_context: Mapping[str, Any], language: str) -> str:
@@ -527,19 +635,29 @@ def _answer_sources(dashboard_context: Mapping[str, Any], language: str) -> str:
             "I do not have enough AI Pulse source data to answer this.",
             "Je n’ai pas assez de données sources dans AI Pulse pour répondre.",
         )
-    lines = [
-        _localized(
-            language,
-            "The most active AI Pulse sources are:",
-            "Les sources AI Pulse les plus actives sont :",
-        )
-    ]
-    for source in sources:
+    top_source = sources[0].get("Source") or sources[0].get("source") or "the top source"
+    summary = _localized(
+        language,
+        f"{top_source} is the most active source in the current dashboard context.",
+        f"{top_source} est la source la plus active dans le contexte dashboard actuel.",
+    )
+    insights: list[str] = []
+    for source in sources[:3]:
         name = source.get("Source") or source.get("source") or "Unknown"
         articles = source.get("articles") or source.get("Articles") or 0
         avg_importance = source.get("Avg importance") or source.get("avg_importance") or "unknown"
-        lines.append(f"- {name}: {articles} articles, average importance {avg_importance}.")
-    return "\n".join(lines)
+        insights.append(f"{name}: {articles} articles, average importance {avg_importance}.")
+    key_numbers = _base_key_numbers(dashboard_context, language)
+    key_numbers.append(
+        _localized(language, f"Top sources shown: {len(sources)}", f"Sources dans le top : {len(sources)}")
+    )
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=key_numbers,
+    )
 
 
 def _answer_sentiment(dashboard_context: Mapping[str, Any], language: str) -> str:
@@ -552,24 +670,30 @@ def _answer_sentiment(dashboard_context: Mapping[str, Any], language: str) -> st
             "I do not have enough AI Pulse sentiment data to answer this.",
             "Je n’ai pas assez de données de sentiment AI Pulse pour répondre.",
         )
-    lines = [
-        _localized(
-            language,
-            f"The dominant AI Pulse sentiment is {dominant}. Distribution:",
-            f"Le sentiment dominant dans AI Pulse est {dominant}. Distribution :",
-        )
+    summary = _localized(
+        language,
+        f"The dominant AI Pulse sentiment is {dominant} in the current dashboard context.",
+        f"Le sentiment dominant dans AI Pulse est {dominant} dans le contexte dashboard actuel.",
+    )
+    insights = [
+        f"{item.get('sentiment', 'unknown')}: {item.get('articles', 0)} articles"
+        for item in distribution[:3]
     ]
-    for item in distribution:
-        lines.append(f"- {item.get('sentiment', 'unknown')}: {item.get('articles', 0)} articles")
     if sentiment_by_day:
-        lines.append(
+        insights.append(
             _localized(
                 language,
-                "Recent daily sentiment percentages are available in the dashboard context for the last days.",
-                "Les pourcentages quotidiens récents sont disponibles dans le contexte dashboard.",
+                "Recent daily sentiment percentages are available for the latest dashboard days.",
+                "Les pourcentages quotidiens récents sont disponibles pour les derniers jours du dashboard.",
             )
         )
-    return "\n".join(lines)
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=_base_key_numbers(dashboard_context, language),
+    )
 
 
 def _answer_importance(dashboard_context: Mapping[str, Any], language: str) -> str:
@@ -581,23 +705,31 @@ def _answer_importance(dashboard_context: Mapping[str, Any], language: str) -> s
             "I do not have enough AI Pulse importance data to answer this.",
             "Je n’ai pas assez de données d’importance AI Pulse pour répondre.",
         )
-    lines = [
-        _localized(
-            language,
-            f"The average AI Pulse importance score is {average_importance}. Top important articles:",
-            f"Le score d’importance moyen AI Pulse est {average_importance}. Articles les plus importants :",
+    summary = _localized(
+        language,
+        f"The average AI Pulse importance score is {average_importance}.",
+        f"Le score d’importance moyen AI Pulse est {average_importance}.",
+    )
+    insights = []
+    for article in articles[:3]:
+        insights.append(
+            f"{article.get('title', 'Untitled article')} — "
+            f"{article.get('source', 'Unknown source')}, "
+            f"sentiment {article.get('sentiment', 'unknown')}, "
+            f"importance {_format_importance(article.get('importance_score'))}/100."
         )
-    ]
-    for index, article in enumerate(articles, start=1):
-        lines.extend(
-            [
-                f"{index}. {article.get('title', 'Untitled article')}",
-                f"- Source: {article.get('source', 'Unknown source')}",
-                f"- Sentiment: {article.get('sentiment', 'unknown')}",
-                f"- Importance: {_format_importance(article.get('importance_score'))}/100",
-            ]
-        )
-    return "\n".join(lines)
+    key_numbers = _base_key_numbers(dashboard_context, language)
+    key_numbers.append(
+        _localized(language, f"Top important articles shown: {len(articles)}", f"Articles importants affichés : {len(articles)}")
+    )
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=key_numbers,
+        sources=_source_names_from_articles(articles),
+    )
 
 
 def _answer_weak_signals(
@@ -607,26 +739,38 @@ def _answer_weak_signals(
 ) -> str:
     signals = _as_records(dashboard_context.get("weak_signals"))[:6]
     if not signals:
-        return _fallback_notice(
+        summary = _fallback_notice(
             language,
             "No weak signals are currently visible in the compact AI Pulse dashboard context.",
             "Aucun signal faible n’est visible dans le contexte compact AI Pulse.",
             error,
         )
-    lines = [
-        _fallback_notice(
-            language,
-            "LLM synthesis is unavailable, so here are deterministic weak signals from AI Pulse:",
-            "La synthèse LLM est indisponible, voici les signaux faibles déterministes depuis AI Pulse :",
-            error,
+        return _format_dashboard_answer(
+            language=language,
+            dashboard_context=dashboard_context,
+            summary=summary,
+            insights=[_localized(language, "No low-volume high-importance topic stands out.", "Aucun topic peu visible et très important ne ressort.")],
+            key_numbers=_base_key_numbers(dashboard_context, language),
         )
-    ]
-    for signal in signals:
+    summary = _fallback_notice(
+        language,
+        "These weak signals come directly from dashboard aggregations.",
+        "Ces signaux faibles viennent directement des agrégations dashboard.",
+        error,
+    )
+    insights = []
+    for signal in signals[:3]:
         topic = signal.get("Topic") or signal.get("topic") or "Unknown"
         articles = signal.get("Articles") or signal.get("articles") or 0
         avg_importance = signal.get("Avg importance") or signal.get("avg_importance") or "unknown"
-        lines.append(f"- {topic}: {articles} articles, average importance {avg_importance}.")
-    return "\n".join(lines)
+        insights.append(f"{topic}: {articles} articles, average importance {avg_importance}.")
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=_base_key_numbers(dashboard_context, language),
+    )
 
 
 def _answer_trends(
@@ -637,20 +781,26 @@ def _answer_trends(
     topics = _as_records(dashboard_context.get("top_topics"))[:5]
     if not topics:
         return _answer_general_summary(dashboard_context, language, error)
-    lines = [
-        _fallback_notice(
-            language,
-            "LLM synthesis is unavailable, so here are deterministic AI Pulse trends:",
-            "La synthèse LLM est indisponible, voici les tendances déterministes AI Pulse :",
-            error,
-        )
-    ]
-    for topic in topics:
+    top_topic = topics[0].get("topic") or topics[0].get("Topic") or "the leading topic"
+    summary = _fallback_notice(
+        language,
+        f"{top_topic} is the strongest visible trend in the current dashboard context.",
+        f"{top_topic} est la tendance la plus visible dans le contexte dashboard actuel.",
+        error,
+    )
+    insights = []
+    for topic in topics[:3]:
         name = topic.get("topic") or topic.get("Topic") or "Unknown"
         articles = topic.get("articles") or topic.get("Articles") or 0
         avg_importance = topic.get("avg_importance") or topic.get("Avg importance") or "unknown"
-        lines.append(f"- {name}: {articles} articles, average importance {avg_importance}.")
-    return "\n".join(lines)
+        insights.append(f"{name}: {articles} articles, average importance {avg_importance}.")
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=_base_key_numbers(dashboard_context, language),
+    )
 
 
 def _answer_general_summary(
@@ -662,19 +812,35 @@ def _answer_general_summary(
     date_range = dashboard_context.get("date_range", {})
     dominant = dashboard_context.get("dominant_sentiment", "unknown")
     average_importance = dashboard_context.get("average_importance_score", 0.0)
-    return _fallback_notice(
+    summary = _fallback_notice(
         language,
-        (
-            f"LLM synthesis is unavailable, but AI Pulse currently contains {total_articles} articles "
-            f"from {date_range.get('start')} to {date_range.get('end')}. "
-            f"Dominant sentiment: {dominant}. Average importance: {average_importance}."
-        ),
-        (
-            f"La synthèse LLM est indisponible, mais AI Pulse contient actuellement {total_articles} articles "
-            f"du {date_range.get('start')} au {date_range.get('end')}. "
-            f"Sentiment dominant : {dominant}. Importance moyenne : {average_importance}."
-        ),
+        f"AI Pulse currently contains {total_articles} articles in the active dashboard context.",
+        f"AI Pulse contient actuellement {total_articles} articles dans le contexte dashboard actif.",
         error,
+    )
+    insights = [
+        _localized(
+            language,
+            f"Dominant sentiment is {dominant}.",
+            f"Le sentiment dominant est {dominant}.",
+        ),
+        _localized(
+            language,
+            f"Average importance is {average_importance}.",
+            f"L’importance moyenne est {average_importance}.",
+        ),
+        _localized(
+            language,
+            f"Date range is {date_range.get('start')} → {date_range.get('end')}.",
+            f"La période est {date_range.get('start')} → {date_range.get('end')}.",
+        ),
+    ]
+    return _format_dashboard_answer(
+        language=language,
+        dashboard_context=dashboard_context,
+        summary=summary,
+        insights=insights,
+        key_numbers=_base_key_numbers(dashboard_context, language),
     )
 
 
@@ -683,6 +849,209 @@ def _fallback_notice(language: str, english: str, french: str, error: str) -> st
     if "rate-limited" in error.lower() or "429" in error:
         return notice
     return notice
+
+
+def _format_dashboard_answer(
+    *,
+    language: str,
+    dashboard_context: Mapping[str, Any],
+    summary: str,
+    insights: list[str],
+    key_numbers: list[str],
+    sources: list[str] | None = None,
+) -> str:
+    headings = {
+        "en": ("Executive summary", "Top insights", "Key numbers", "Sources used"),
+        "fr": ("Résumé exécutif", "Insights clés", "Chiffres clés", "Sources utilisées"),
+    }
+    executive_heading, insights_heading, numbers_heading, sources_heading = headings.get(
+        language,
+        headings["en"],
+    )
+    scope_line = _dashboard_scope_line(dashboard_context, language)
+    source_names = sources or _source_names_from_context(dashboard_context)
+    if not source_names:
+        source_names = [
+            _localized(
+                language,
+                "Current dashboard context",
+                "Contexte dashboard actuel",
+            )
+        ]
+
+    lines = [
+        f"### {executive_heading}",
+        scope_line,
+        summary,
+        "",
+        f"### {insights_heading}",
+    ]
+    lines.extend(f"- {insight}" for insight in insights[:3])
+    lines.extend(["", f"### {numbers_heading}"])
+    lines.extend(f"- {number}" for number in key_numbers[:5])
+    lines.extend(["", f"### {sources_heading}"])
+    lines.extend(f"- {source}" for source in source_names[:5])
+    return "\n".join(lines).strip()
+
+
+def _dashboard_scope_line(dashboard_context: Mapping[str, Any], language: str) -> str:
+    temporal_filter = dashboard_context.get("temporal_filter")
+    filter_context = dashboard_context.get("filter_context")
+    if isinstance(filter_context, Mapping):
+        date_label = str(filter_context.get("date_label") or "").strip()
+        date_range = filter_context.get("date_range")
+        sentiments = _filter_value_summary(filter_context.get("sentiments"), language)
+        sources = _filter_value_summary(filter_context.get("sources"), language)
+        min_importance = filter_context.get("min_importance")
+        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+            date_label = f"{date_label} ({date_range[0]} → {date_range[1]})".strip()
+        temporal_text = f", demande temporelle={temporal_filter}" if temporal_filter else ""
+        if language == "fr":
+            return (
+                "Réponse basée sur les filtres dashboard actuels : "
+                f"dates={date_label or 'contexte actuel'}, sentiments={sentiments}, "
+                f"sources={sources}, importance min={min_importance}{temporal_text}."
+            )
+        temporal_text = f", time request={temporal_filter}" if temporal_filter else ""
+        return (
+            "Based on the current dashboard filters: "
+            f"dates={date_label or 'current context'}, sentiments={sentiments}, "
+            f"sources={sources}, min importance={min_importance}{temporal_text}."
+        )
+
+    date_range = dashboard_context.get("date_range")
+    if isinstance(date_range, Mapping) and (date_range.get("start") or date_range.get("end")):
+        if language == "fr":
+            return (
+                "Réponse basée sur le contexte dashboard actuel "
+                f"({date_range.get('start')} → {date_range.get('end')})"
+                f"{f', demande temporelle={temporal_filter}' if temporal_filter else ''}."
+            )
+        return (
+            "Based on the current dashboard context "
+            f"({date_range.get('start')} → {date_range.get('end')})"
+            f"{f', time request={temporal_filter}' if temporal_filter else ''}."
+        )
+    return _localized(
+        language,
+        "Based on the current dashboard context.",
+        "Réponse basée sur le contexte dashboard actuel.",
+    )
+
+
+def _filter_value_summary(value: Any, language: str) -> str:
+    if isinstance(value, list):
+        if not value:
+            return _localized(language, "all", "tous")
+        if len(value) <= 3:
+            return ", ".join(str(item) for item in value)
+        return _localized(language, f"{len(value)} selected", f"{len(value)} sélectionnés")
+    if value:
+        return str(value)
+    return _localized(language, "all", "tous")
+
+
+def _base_key_numbers(dashboard_context: Mapping[str, Any], language: str) -> list[str]:
+    date_range = dashboard_context.get("date_range", {})
+    date_text = (
+        f"{date_range.get('start')} → {date_range.get('end')}"
+        if isinstance(date_range, Mapping)
+        else "unknown"
+    )
+    if language == "fr":
+        return [
+            f"Articles analysés : {dashboard_context.get('total_articles', 0)}",
+            f"Période : {date_text}",
+            f"Sentiment dominant : {dashboard_context.get('dominant_sentiment', 'unknown')}",
+            f"Importance moyenne : {dashboard_context.get('average_importance_score', 0.0)}",
+        ]
+    return [
+        f"Analyzed articles: {dashboard_context.get('total_articles', 0)}",
+        f"Date range: {date_text}",
+        f"Dominant sentiment: {dashboard_context.get('dominant_sentiment', 'unknown')}",
+        f"Average importance: {dashboard_context.get('average_importance_score', 0.0)}",
+    ]
+
+
+def _source_names_from_context(dashboard_context: Mapping[str, Any]) -> list[str]:
+    sources: list[str] = []
+    for source in _as_records(dashboard_context.get("top_sources"))[:5]:
+        name = source.get("Source") or source.get("source")
+        if name:
+            sources.append(str(name))
+    return sources
+
+
+def _source_names_from_articles(articles: list[Mapping[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for article in articles:
+        source = str(article.get("source", "")).strip()
+        if source and source not in names:
+            names.append(source)
+    return names
+
+
+def _article_topics_or_keywords(article: Mapping[str, Any]) -> list[str]:
+    topics = _coerce_text_list(article.get("topics"))
+    topic = str(article.get("topic") or "").strip()
+    if topic:
+        topics.append(topic)
+    keywords = normalize_keywords(article.get("keywords"))
+    merged: list[str] = []
+    for value in [*topics, *keywords]:
+        clean_value = str(value).strip()
+        if clean_value and clean_value not in merged:
+            merged.append(_truncate_text(clean_value, 80))
+    return merged[:8]
+
+
+def _article_companies(article: Mapping[str, Any]) -> list[str]:
+    explicit_companies = _coerce_text_list(article.get("companies"))
+    extracted_entities = _coerce_text_list(article.get("extracted_entities"))
+    text = " ".join(
+        [
+            str(article.get("title") or ""),
+            str(article.get("summary") or ""),
+            str(article.get("description") or ""),
+            " ".join(normalize_keywords(article.get("keywords"))),
+            " ".join(explicit_companies),
+            " ".join(extracted_entities),
+        ]
+    ).lower()
+    known_companies = {
+        "OpenAI": ("openai", "chatgpt", "gpt-"),
+        "Google": ("google", "gemini", "deepmind"),
+        "Microsoft": ("microsoft", "azure", "copilot"),
+        "Meta": ("meta", "llama"),
+        "Anthropic": ("anthropic", "claude"),
+        "Mistral AI": ("mistral",),
+        "Nvidia": ("nvidia",),
+        "Apple": ("apple",),
+    }
+    companies: list[str] = []
+    for company in explicit_companies:
+        clean_company = _truncate_text(company, 80)
+        if clean_company and clean_company not in companies:
+            companies.append(clean_company)
+    for company, aliases in known_companies.items():
+        if any(alias in text for alias in aliases) and company not in companies:
+            companies.append(company)
+    return companies[:8]
+
+
+def _coerce_text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if "," in stripped:
+            return [part.strip() for part in stripped.split(",") if part.strip()]
+        return [stripped]
+    return []
 
 
 def _asks_important_articles_by_company(normalized_question: str) -> bool:
@@ -752,7 +1121,9 @@ def _answer_language(question: str) -> str:
         "ajoute",
         "enleve",
         "enlève",
+        "bjr",
         "bonjour",
+        "bonjou",
         "bonsoir",
         "salut",
         "coucou",
@@ -781,14 +1152,18 @@ def _protected_dashboard_payload(
     *,
     question: str,
     dashboard_context: Mapping[str, Any],
-    article_context: list[Mapping[str, Any]],
+    retrieved_articles: list[Mapping[str, Any]],
     intent: str,
+    language: str | None = None,
 ) -> dict[str, Any]:
     payload = {
         "intent": intent,
-        "question": question,
-        "dashboard_context": dict(dashboard_context),
-        "retrieved_evidence": [_compact_evidence_article(article) for article in article_context[:3]],
+        "answer_language": "French" if (language or _answer_language(question)) == "fr" else "English",
+        **build_hybrid_assistant_context(
+            question,
+            dashboard_context,
+            retrieved_articles,
+        ),
     }
     if _payload_size_kb(payload) <= MAX_LLM_PAYLOAD_KB:
         payload["payload_size_kb"] = _payload_size_kb(payload)
@@ -817,14 +1192,16 @@ def _reduce_dashboard_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(reduced_context.get(key), list):
             reduced_context[key] = reduced_context[key][:3]
     reduced_evidence = [
-        _without_keys(dict(article), {"url", "description", "content"})
-        for article in list(payload.get("retrieved_evidence", []))[:2]
+        _without_keys(dict(article), {"description", "content"})
+        for article in list(payload.get("retrieved_evidence", []))[:4]
     ]
     return {
         "intent": payload.get("intent"),
+        "answer_language": payload.get("answer_language"),
         "question": payload.get("question"),
         "dashboard_context": reduced_context,
         "retrieved_evidence": reduced_evidence,
+        "instructions": payload.get("instructions"),
     }
 
 
@@ -852,9 +1229,14 @@ def _minimal_dashboard_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             minimal_context[key] = minimal_context[key][:5]
     return {
         "intent": payload.get("intent"),
+        "answer_language": payload.get("answer_language"),
         "question": payload.get("question"),
         "dashboard_context": minimal_context,
-        "retrieved_evidence": [],
+        "retrieved_evidence": [
+            _without_keys(dict(article), {"url", "short_summary", "description", "content"})
+            for article in list(payload.get("retrieved_evidence", []))[:3]
+        ],
+        "instructions": payload.get("instructions"),
     }
 
 
@@ -1064,25 +1446,22 @@ def _professional_fallback_answer(
 def _ensure_source_appendix(
     answer: str,
     retrieved_articles: list[Mapping[str, Any]],
+    language: str = "en",
 ) -> str:
-    source_urls = [
-        str(article.get("url", "")).strip()
-        for article in retrieved_articles
-        if str(article.get("url", "")).strip()
-    ]
-    if source_urls and any(url in answer for url in source_urls):
+    if "sources used" in answer.lower() or "sources utilisées" in answer.lower():
         return answer
 
     citations = _citation_labels(retrieved_articles)
     source_lines = _source_lines(retrieved_articles, citations)
     if not source_lines:
         return answer
+    heading = "Sources utilisées" if language == "fr" else "Sources used"
 
     return "\n".join(
         [
             answer.rstrip(),
             "",
-            "### Sources used",
+            f"### {heading}",
             *source_lines,
         ]
     )
@@ -1182,6 +1561,15 @@ def _asks_for_english(normalized_question: str) -> bool:
     )
 
 
+def _is_greeting_or_casual(normalized_question: str) -> bool:
+    cleaned = normalized_question.strip(" ?.!,")
+    first_word = cleaned.replace(",", " ").replace("!", " ").split(maxsplit=1)[0]
+    return (
+        first_word in CONVERSATION_STARTERS
+        or any(phrase in cleaned for phrase in CASUAL_CONVERSATION_PHRASES)
+    )
+
+
 def _is_data_query(normalized_question: str) -> bool:
     words = set(normalized_question.replace("?", " ").replace(",", " ").split())
     return any(term in words or term in normalized_question for term in DATA_QUERY_TERMS)
@@ -1192,9 +1580,18 @@ def _normalize_question(question: str) -> str:
         question.strip()
         .lower()
         .replace("’", "'")
+        .replace("à", "a")
+        .replace("â", "a")
+        .replace("ç", "c")
         .replace("é", "e")
         .replace("è", "e")
         .replace("ê", "e")
+        .replace("ë", "e")
+        .replace("î", "i")
+        .replace("ï", "i")
+        .replace("ô", "o")
+        .replace("ù", "u")
+        .replace("û", "u")
     )
 
 

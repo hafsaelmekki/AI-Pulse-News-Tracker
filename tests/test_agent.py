@@ -10,7 +10,9 @@ from ai_pulse_tracker.agent import (
     answer_important_articles_by_company,
     answer_question,
     build_dashboard_llm_messages,
+    build_hybrid_assistant_context,
     build_llm_messages,
+    build_retrieved_evidence,
     detect_assistant_language,
     detect_dashboard_intent,
     detect_language_change_request,
@@ -115,7 +117,7 @@ def test_answer_question_handles_conversation_prompts():
     answer = answer_question("hey Hafsa", [])
 
     assert is_conversation_prompt("hey Hafsa")
-    assert "Hey Hafsa" in answer
+    assert "Hi Hafsa" in answer
     assert "could not find stored articles" not in answer
 
 
@@ -129,6 +131,9 @@ def test_answer_question_does_not_search_language_switch_prompt():
 
 def test_assistant_language_detection_and_switch_requests():
     assert detect_assistant_language("bonjour") == "fr"
+    assert detect_assistant_language("bonjou") == "fr"
+    assert detect_assistant_language("bjr") == "fr"
+    assert detect_assistant_language("Bonjour, ça va ?") == "fr"
     assert detect_assistant_language("je veux voir les tendances") == "fr"
     assert detect_assistant_language("show companies") == "en"
     assert detect_assistant_language("show me companies") == "en"
@@ -137,12 +142,16 @@ def test_assistant_language_detection_and_switch_requests():
     assert detect_language_change_request("show companies") is None
 
 
-def test_answer_conversation_uses_locked_language():
+def test_answer_conversation_uses_latest_message_language():
     english_answer = answer_conversation("bonjour", language="en")
     french_answer = answer_conversation("hello", language="fr")
+    typo_answer = answer_conversation("Bonjou")
+    casual_answer = answer_conversation("Bonjour, ça va ?")
 
-    assert "I am your AI Pulse assistant" in english_answer
-    assert "Je suis ton assistant AI Pulse" in french_answer
+    assert "Hi Hafsa" in english_answer
+    assert "Bonjour Hafsa" in french_answer
+    assert "Bonjour Hafsa" in typo_answer
+    assert "Bonjour Hafsa" in casual_answer
 
 
 def test_build_llm_messages_contains_article_context():
@@ -194,9 +203,11 @@ def test_build_dashboard_llm_messages_contains_dashboard_context():
     )
 
     assert messages[0]["content"] == AI_PULSE_SYSTEM_PROMPT
+    assert "hybrid_assistant_context" in messages[1]["content"]
     assert "dashboard_context" in messages[1]["content"]
+    assert "retrieved_evidence" in messages[1]["content"]
     assert '"total_articles": 2' in messages[1]["content"]
-    assert "Retrieved article evidence" in messages[1]["content"]
+    assert '"citation_id": "[1]"' in messages[1]["content"]
 
 
 def test_build_dashboard_llm_messages_uses_locked_language():
@@ -210,51 +221,91 @@ def test_build_dashboard_llm_messages_uses_locked_language():
 
     assert "Answer language: French" in messages[1]["content"]
     assert "Write the entire answer in French" in messages[1]["content"]
+    assert "detailed RAG-style analytical answer" in messages[1]["content"]
+    assert "current dashboard filters" in messages[1]["content"]
 
 
-def test_answer_dashboard_question_uses_deterministic_company_answer(monkeypatch):
+def test_build_retrieved_evidence_is_compact_and_cited():
+    evidence = build_retrieved_evidence(_results(), max_articles=1)
+
+    assert len(evidence) == 1
+    assert evidence[0]["citation_id"] == "[1]"
+    assert evidence[0]["title"] == "OpenAI launches agent tools"
+    assert evidence[0]["published_at"] == ""
+    assert evidence[0]["importance_score"] == "86.0"
+    assert evidence[0]["companies"] == ["OpenAI"]
+    assert len(evidence[0]["short_summary"]) <= 400
+    assert "content" not in evidence[0]
+
+
+def test_build_hybrid_assistant_context_combines_dashboard_and_evidence():
+    context = build_hybrid_assistant_context(
+        "What are the trends?",
+        _dashboard_context(),
+        _results(),
+    )
+
+    assert context["question"] == "What are the trends?"
+    assert context["dashboard_context"]["total_articles"] == 10
+    assert context["retrieved_evidence"][0]["citation_id"] == "[1]"
+    assert "Use dashboard_context" in context["instructions"]
+
+
+def test_answer_dashboard_question_uses_llm_when_available(monkeypatch):
     monkeypatch.delenv("AI_PULSE_LLM_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
         "ai_pulse_tracker.agent._try_generate_with_llm",
-        lambda messages: (_ for _ in ()).throw(AssertionError("LLM should not be called")),
+        lambda messages: "### Executive summary\nOpenAI is the strongest company signal [1].",
     )
 
     answer = answer_dashboard_question(
         "Which companies are most mentioned?",
         _dashboard_context(),
-        [],
+        _results(),
         intent="companies",
     )
 
     assert "OpenAI" in answer
-    assert "8 articles" in answer
+    assert "### Executive summary" in answer
+    assert "### Sources used" in answer
+    assert "https://example.com/agents" in answer
     assert "LLM is required" not in answer
 
 
-def test_simple_dashboard_intents_do_not_call_llm(monkeypatch):
+def test_simple_dashboard_intents_use_llm_when_available(monkeypatch):
+    calls = []
+
+    def fake_llm(messages):
+        calls.append(messages)
+        return "### Executive summary\nThis is a RAG-style dashboard answer [1]."
+
     monkeypatch.setattr(
         "ai_pulse_tracker.agent._try_generate_with_llm",
-        lambda messages: (_ for _ in ()).throw(AssertionError("LLM should not be called")),
+        fake_llm,
     )
 
     cases = [
-        ("Which sources are most active?", "sources", "AI News"),
-        ("What is the sentiment distribution?", "sentiment", "neutral"),
-        ("Which articles are most important?", "importance", "OpenAI launches important AI agent update"),
+        ("Which sources are most active?", "sources"),
+        ("What is the sentiment distribution?", "sentiment"),
+        ("Which articles are most important?", "importance"),
     ]
-    for question, intent, expected_text in cases:
+    for question, intent in cases:
         answer = answer_dashboard_question(
             question,
             _dashboard_context(),
-            [],
+            _results(),
             intent=intent,
         )
-        assert expected_text in answer
+        assert "RAG-style dashboard answer" in answer
         assert "LLM is required" not in answer
+    assert len(calls) == 3
 
 
-def test_deterministic_dashboard_answer_uses_locked_language():
+def test_deterministic_dashboard_answer_uses_locked_language(monkeypatch):
+    monkeypatch.delenv("AI_PULSE_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
     answer = answer_dashboard_question(
         "Which sources are most active?",
         _dashboard_context(),
@@ -263,15 +314,17 @@ def test_deterministic_dashboard_answer_uses_locked_language():
         language="fr",
     )
 
-    assert "Les sources AI Pulse" in answer
+    assert "synthèse RAG générative est temporairement indisponible" in answer
+    assert "### Résumé exécutif" in answer
+    assert "AI News" in answer
 
 
 def test_answer_important_articles_by_company_matches_top_companies():
     answer = answer_important_articles_by_company(_dashboard_context())
 
     assert "OpenAI launches important AI agent update" in answer
-    assert "Company: OpenAI" in answer
-    assert "Importance: 92.4/100" in answer
+    assert "OpenAI, AI News" in answer
+    assert "importance 92.4/100" in answer
     assert "Google Gemini expands enterprise AI deployment" in answer
 
 
@@ -290,7 +343,7 @@ def test_answer_dashboard_question_falls_back_on_rate_limit(monkeypatch):
         intent="trends",
     )
 
-    assert "AI Pulse trends" in answer
+    assert "### Executive summary" in answer
     assert "AI Agents" in answer
     assert "LLM is required" not in answer
 
@@ -331,7 +384,7 @@ def test_protected_dashboard_payload_reduces_oversized_context():
     payload = _protected_dashboard_payload(
         question="Which articles are most important?",
         dashboard_context=context,
-        article_context=_results(),
+        retrieved_articles=_results(),
         intent="importance",
     )
 

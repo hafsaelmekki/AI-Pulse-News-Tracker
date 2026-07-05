@@ -1266,7 +1266,7 @@ def _render_evidence(search_results: list[dict[str, object]]) -> None:
     if not search_results:
         return
 
-    with st.expander("Retrieved article evidence", expanded=False):
+    with st.expander("Voir les articles récupérés", expanded=False):
         st.dataframe(
             pd.DataFrame(search_results)[
                 [
@@ -1441,7 +1441,7 @@ def _filter_assistant_dataframe_by_time(
     prompt: str,
 ) -> tuple[pd.DataFrame, str | None]:
     window = _assistant_temporal_window(prompt)
-    if window is None or df.empty:
+    if window is None or df.empty or "date" not in df.columns:
         return df, None
 
     start_date, end_date, label = window
@@ -1525,6 +1525,14 @@ def _set_browser_title(title: str) -> None:
     )
 
 
+def _assistant_base_dataframe(default_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object] | None]:
+    rows = st.session_state.get("assistant_dashboard_rows")
+    filter_context = st.session_state.get("assistant_dashboard_filter_context")
+    if isinstance(rows, list):
+        return pd.DataFrame(rows), filter_context if isinstance(filter_context, dict) else None
+    return default_df, None
+
+
 def _render_ai_assistant(df: pd.DataFrame) -> None:
     if "agent_messages" not in st.session_state:
         st.session_state.agent_messages = []
@@ -1586,10 +1594,7 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
         return
 
     requested_language = detect_language_change_request(prompt)
-    if requested_language:
-        st.session_state.assistant_language = requested_language
-    elif not st.session_state.get("assistant_language"):
-        st.session_state.assistant_language = detect_assistant_language(prompt)
+    st.session_state.assistant_language = requested_language or detect_assistant_language(prompt)
     assistant_language = str(st.session_state.get("assistant_language") or "en")
 
     detected_intent = detect_dashboard_intent(prompt)
@@ -1609,17 +1614,20 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
         search_results = []
         answer = answer_conversation(prompt, language=assistant_language)
     else:
+        base_df, filter_context = _assistant_base_dataframe(df)
         scoped_df, temporal_label = _filter_assistant_dataframe_by_time(
-            df,
+            base_df,
             effective_question,
         )
         dashboard_context = build_compact_dashboard_context(scoped_df)
+        if filter_context:
+            dashboard_context["filter_context"] = filter_context
         if temporal_label:
             dashboard_context["temporal_filter"] = temporal_label
         search_results = search_articles(
             scoped_df.to_dict("records"),
             effective_question,
-            limit=3,
+            limit=6,
         )
         cache_key = _assistant_answer_cache_key(
             effective_question,
@@ -1960,6 +1968,29 @@ def _quick_date_range(
     return max_date - lookback, max_date
 
 
+def _store_assistant_dashboard_scope(
+    filtered_df: pd.DataFrame,
+    *,
+    selected_date_filter: str,
+    normalized_date_range: tuple[object, object] | None,
+    selected_sentiments: list[str],
+    selected_sources: list[str],
+    min_importance: float,
+) -> None:
+    date_range = None
+    if normalized_date_range is not None:
+        start_date, end_date = normalized_date_range
+        date_range = [str(start_date), str(end_date)]
+    st.session_state["assistant_dashboard_rows"] = filtered_df.to_dict("records")
+    st.session_state["assistant_dashboard_filter_context"] = {
+        "date_label": selected_date_filter,
+        "date_range": date_range,
+        "sentiments": selected_sentiments,
+        "sources": selected_sources,
+        "min_importance": round(float(min_importance), 1),
+    }
+
+
 def _render_dashboard_view(df: pd.DataFrame) -> None:
     _render_dashboard_header(df)
 
@@ -2034,6 +2065,14 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         selected_sources,
         min_importance,
         normalized_date_range,
+    )
+    _store_assistant_dashboard_scope(
+        filtered_df,
+        selected_date_filter=selected_date_filter,
+        normalized_date_range=normalized_date_range,
+        selected_sentiments=selected_sentiments,
+        selected_sources=selected_sources,
+        min_importance=min_importance,
     )
 
     if filtered_df.empty:
