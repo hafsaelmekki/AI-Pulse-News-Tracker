@@ -21,7 +21,12 @@ class NewsClient:
         self._settings = settings
         self._session = session or requests.Session()
 
-    def fetch_articles(self, query: str | None = None, after: datetime | None = None) -> list[Article]:
+    def fetch_articles(
+        self,
+        query: str | None = None,
+        after: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[Article]:
         desired_count = max(1, self._settings.news_batch_size)
         page_size = min(desired_count, 100)
         max_pages = min(MAX_NEWSAPI_PAGES, math.ceil(desired_count / page_size))
@@ -49,6 +54,8 @@ class NewsClient:
             }
             if effective_after:
                 params["from"] = _format_from_param(effective_after)
+            if until:
+                params["to"] = _format_to_param(until)
             response = self._session.get(
                 "https://newsapi.org/v2/everything",
                 params=params,
@@ -97,9 +104,17 @@ def _parse_date(value: str) -> datetime:
 
 
 def _format_from_param(value: datetime) -> str:
+    return _format_newsapi_datetime(value, increment_seconds=1)
+
+
+def _format_to_param(value: datetime) -> str:
+    return _format_newsapi_datetime(value)
+
+
+def _format_newsapi_datetime(value: datetime, increment_seconds: int = 0) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    value = value.astimezone(timezone.utc) + timedelta(seconds=1)
+    value = value.astimezone(timezone.utc) + timedelta(seconds=increment_seconds)
     value = value.replace(microsecond=0)
     return value.isoformat().replace("+00:00", "Z")
 

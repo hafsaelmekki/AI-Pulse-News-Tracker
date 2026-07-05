@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
         help="ISO-8601 timestamp to refetch articles published after this moment (e.g. 2024-04-01T12:30:00Z).",
     )
     parser.add_argument(
+        "--until",
+        default=None,
+        help="ISO-8601 timestamp to refetch articles published before this moment.",
+    )
+    parser.add_argument(
         "--full-refresh",
         action="store_true",
         help="Ignore the incremental cursor and refetch the latest batch even if already ingested.",
@@ -63,11 +68,12 @@ def run_once(pipeline: NewsAnalyzerPipeline, args: argparse.Namespace) -> None:
 def _build_run_kwargs(args: argparse.Namespace) -> dict:
     try:
         since = _parse_since(args.since) if args.since else None
+        until = _parse_until(args.until) if args.until else None
     except ValueError as exc:
-        print(f"Invalid --since value: {exc}", file=sys.stderr)
+        print(f"Invalid date value: {exc}", file=sys.stderr)
         sys.exit(2)
-    incremental = not args.full_refresh and not since
-    return {"after": since, "incremental": incremental}
+    incremental = not args.full_refresh and not since and not until
+    return {"after": since, "until": until, "incremental": incremental}
 
 
 def run_continuous(pipeline: NewsAnalyzerPipeline, args: argparse.Namespace) -> None:
@@ -96,6 +102,14 @@ def main() -> None:
 
 
 def _parse_since(value: str) -> datetime:
+    return _parse_iso_datetime(value)
+
+
+def _parse_until(value: str) -> datetime:
+    return _parse_iso_datetime(value)
+
+
+def _parse_iso_datetime(value: str) -> datetime:
     normalized = value.replace("Z", "+00:00")
     dt = datetime.fromisoformat(normalized)
     if dt.tzinfo is None:

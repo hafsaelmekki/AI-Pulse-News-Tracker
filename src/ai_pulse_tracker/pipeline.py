@@ -32,6 +32,7 @@ class NewsAnalyzerPipeline:
         query: str | None = None,
         *,
         after: datetime | None = None,
+        until: datetime | None = None,
         incremental: bool = True,
     ) -> UpsertResult:
         configure_logging()
@@ -41,7 +42,11 @@ class NewsAnalyzerPipeline:
                 effective_after = self._repository.latest_published_at()
             if effective_after is None:
                 effective_after = datetime.now(timezone.utc) - timedelta(days=30)
-        articles = self._news_client.fetch_articles(query, after=effective_after)
+        articles = self._news_client.fetch_articles(
+            query,
+            after=effective_after,
+            until=until,
+        )
         if not articles:
             LOGGER.warning("No new articles retrieved from NewsAPI")
             return UpsertResult(ids=[], created=0, updated=0)

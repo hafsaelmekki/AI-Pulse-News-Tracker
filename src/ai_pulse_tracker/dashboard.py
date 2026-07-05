@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import math
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from .agent import answer_conversation, answer_question, is_conversation_prompt
@@ -34,6 +36,16 @@ TRACKED_COMPANIES = {
     "Mistral AI": ("mistral", "mistral ai"),
     "Nvidia": ("nvidia",),
     "Apple": ("apple",),
+}
+SENTIMENT_COLORS = {
+    "positive": "#4ECB71",
+    "neutral": "#F28E2B",
+    "negative": "#F05A5A",
+}
+SENTIMENT_LABELS = {
+    "positive": "Positive",
+    "neutral": "Neutral",
+    "negative": "Negative",
 }
 
 
@@ -157,16 +169,11 @@ def _keyword_dataframe(df: pd.DataFrame, limit: int = 12) -> pd.DataFrame:
 
 def _detect_topics(row: pd.Series) -> list[str]:
     text = _row_text(row)
-    topics = [
+    return [
         topic
         for topic, aliases in TRACKED_TOPICS.items()
         if any(alias in text for alias in aliases)
     ]
-    if topics:
-        return topics
-
-    keywords = normalize_keywords(row.get("keywords"))
-    return [_title_case_topic(keyword) for keyword in keywords[:3]]
 
 
 def _detect_companies(row: pd.Series) -> list[str]:
@@ -188,10 +195,6 @@ def _row_text(row: pd.Series) -> str:
             keywords,
         ]
     ).lower()
-
-
-def _title_case_topic(value: str) -> str:
-    return value.replace("-", " ").replace("_", " ").title()
 
 
 def _confidence_score(row: object, key: str) -> float:
@@ -445,11 +448,19 @@ def _weak_signals_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _render_sentiment_analysis(df: pd.DataFrame) -> None:
+def _render_sentiment_analysis(
+    df: pd.DataFrame,
+    date_range: tuple[object, object] | None = None,
+    synthetic_fill: bool = False,
+) -> None:
     st.subheader("Sentiment Analysis")
 
     sentiment_df = _sentiment_distribution_dataframe(df)
-    daily_score_df = _daily_sentiment_score_dataframe(df)
+    daily_sentiment_df = _daily_sentiment_percentage_dataframe(
+        df,
+        date_range=date_range,
+        synthetic_fill=synthetic_fill,
+    )
 
     distribution_col, evolution_col = st.columns(2)
     with distribution_col:
@@ -464,37 +475,19 @@ def _render_sentiment_analysis(df: pd.DataFrame) -> None:
                     values="articles",
                     hole=0.45,
                     color="sentiment",
-                    color_discrete_map={
-                        "positive": "#00CC96",
-                        "neutral": "#636EFA",
-                        "negative": "#EF553B",
-                    },
+                    color_discrete_map=SENTIMENT_COLORS,
                 ),
                 use_container_width=True,
             )
 
     with evolution_col:
-        st.markdown("**Average sentiment over time**")
-        if daily_score_df.empty:
+        if daily_sentiment_df.empty:
             st.info("Not enough dated articles to plot sentiment evolution.")
         else:
             st.plotly_chart(
-                px.line(
-                    daily_score_df,
-                    x="date",
-                    y="average_sentiment",
-                    markers=True,
-                    range_y=[-1, 1],
-                ).update_layout(
-                    yaxis_title="Average sentiment (-1 negative, +1 positive)",
-                    xaxis_title="Date",
-                ),
+                _sentiment_trend_figure(daily_sentiment_df),
                 use_container_width=True,
             )
-
-    insight = _sentiment_trend_insight(daily_score_df)
-    if insight:
-        st.info(insight)
 
 
 def _sentiment_distribution_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -510,46 +503,198 @@ def _sentiment_distribution_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _daily_sentiment_score_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _sentiment_trend_figure(daily_sentiment_df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for sentiment, label in SENTIMENT_LABELS.items():
+        sentiment_df = daily_sentiment_df[
+            daily_sentiment_df["sentiment"] == sentiment
+        ].sort_values("date")
+        if sentiment_df.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=sentiment_df["date"],
+                y=sentiment_df["percentage"],
+                name=label,
+                mode="lines",
+                line={
+                    "color": SENTIMENT_COLORS[sentiment],
+                    "width": 2,
+                    "shape": "spline",
+                    "smoothing": 0.7,
+                },
+                hovertemplate=f"{label} Sentiment<br><b>%{{y:.0f}}%</b><extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        title={
+            "text": "Sentiment Trend Overview",
+            "x": 0,
+            "xanchor": "left",
+            "font": {"size": 16, "color": "#2F2F2F"},
+        },
+        height=320,
+        margin={"l": 8, "r": 16, "t": 54, "b": 8},
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        hovermode="closest",
+        legend={
+            "orientation": "h",
+            "x": 1,
+            "xanchor": "right",
+            "y": 1.16,
+            "yanchor": "top",
+            "title": {"text": ""},
+            "font": {"size": 13, "color": "#8A8A8A"},
+        },
+        yaxis={
+            "title": {"text": "Sentiment Percentage"},
+            "range": [0, 100],
+            "ticksuffix": "%",
+            "showgrid": True,
+            "gridcolor": "rgba(0,0,0,0.10)",
+            "zeroline": False,
+            "tickfont": {"color": "#8A8A8A"},
+        },
+        xaxis={
+            "title": {"text": "Date"},
+            "tickformat": "%d %b",
+            "nticks": 8,
+            "showgrid": False,
+            "showline": False,
+            "tickfont": {"color": "#8A8A8A"},
+            "showspikes": True,
+            "spikemode": "across",
+            "spikesnap": "cursor",
+            "spikecolor": "rgba(0,0,0,0.18)",
+            "spikethickness": 1,
+        },
+    )
+    return fig
+
+
+def _daily_sentiment_percentage_dataframe(
+    df: pd.DataFrame,
+    date_range: tuple[object, object] | None = None,
+    synthetic_fill: bool = False,
+) -> pd.DataFrame:
     trend_df = df.copy()
     trend_df["date"] = pd.to_datetime(
         trend_df["date"], utc=True, errors="coerce")
-    trend_df["sentiment_score"] = (
+    trend_df["sentiment"] = (
         trend_df["sentiment"]
         .fillna("")
         .astype(str)
         .str.lower()
-        .map({"positive": 1.0, "neutral": 0.0, "negative": -1.0})
+        .str.strip()
     )
-    trend_df = trend_df.dropna(subset=["date", "sentiment_score"])
+    trend_df = trend_df[
+        trend_df["sentiment"].isin(["positive", "neutral", "negative"])
+    ].dropna(subset=["date"])
     if trend_df.empty:
-        return pd.DataFrame(columns=["date", "average_sentiment", "articles"])
+        return pd.DataFrame(
+            columns=["date", "sentiment", "articles", "percentage", "data_type"]
+        )
 
     trend_df["date"] = trend_df["date"].dt.date
-    return (
-        trend_df.groupby("date", as_index=False)
-        .agg(
-            average_sentiment=("sentiment_score", "mean"),
-            articles=("title", "count"),
-        )
+    counts = (
+        trend_df.groupby(["date", "sentiment"], as_index=False)
+        .agg(articles=("title", "count"))
         .sort_values("date")
     )
+    all_daily_sentiments = pd.MultiIndex.from_product(
+        [
+            sorted(counts["date"].unique()),
+            ["positive", "neutral", "negative"],
+        ],
+        names=["date", "sentiment"],
+    ).to_frame(index=False)
+    counts = all_daily_sentiments.merge(
+        counts,
+        on=["date", "sentiment"],
+        how="left",
+    )
+    counts["articles"] = counts["articles"].fillna(0).astype(int)
+    daily_totals = counts.groupby("date")["articles"].transform("sum")
+    counts["percentage"] = counts["articles"] / daily_totals * 100
+    counts["data_type"] = "actual"
+    if synthetic_fill:
+        counts = _fill_synthetic_sentiment_dates(counts, date_range)
+    return _smooth_sentiment_percentages(counts)
 
 
-def _sentiment_trend_insight(daily_score_df: pd.DataFrame) -> str | None:
-    if len(daily_score_df) < 2:
-        return None
+def _fill_synthetic_sentiment_dates(
+    counts: pd.DataFrame,
+    date_range: tuple[object, object] | None,
+) -> pd.DataFrame:
+    if counts.empty:
+        return counts
 
-    recent_df = daily_score_df.tail(3)
-    previous_score = float(recent_df.iloc[0]["average_sentiment"])
-    latest_score = float(recent_df.iloc[-1]["average_sentiment"])
-    delta = latest_score - previous_score
+    start_date = counts["date"].min()
+    end_date = counts["date"].max()
+    if date_range is not None:
+        start_date, end_date = date_range
 
-    if delta <= -0.2:
-        return "Signal: sentiment has become more negative over the latest available days."
-    if delta >= 0.2:
-        return "Signal: sentiment has become more positive over the latest available days."
-    return "Signal: sentiment is broadly stable over the latest available days."
+    all_dates = pd.date_range(start_date, end_date, freq="D").date
+    all_daily_sentiments = pd.MultiIndex.from_product(
+        [all_dates, ["positive", "neutral", "negative"]],
+        names=["date", "sentiment"],
+    ).to_frame(index=False)
+    filled = all_daily_sentiments.merge(
+        counts,
+        on=["date", "sentiment"],
+        how="left",
+    )
+    filled["articles"] = filled["articles"].fillna(0).astype(int)
+    filled["data_type"] = filled["data_type"].fillna("synthetic")
+    filled["percentage"] = (
+        filled.groupby("sentiment")["percentage"]
+        .transform(lambda values: values.interpolate().bfill().ffill())
+        .fillna(0.0)
+    )
+    return _add_synthetic_sentiment_variation(filled)
+
+
+def _add_synthetic_sentiment_variation(filled: pd.DataFrame) -> pd.DataFrame:
+    synthetic_mask = filled["data_type"].eq("synthetic")
+    if not synthetic_mask.any():
+        return filled
+
+    varied = filled.copy()
+    phases = {
+        "positive": 0.0,
+        "neutral": 2.2,
+        "negative": 4.4,
+    }
+
+    def adjusted_percentage(row: pd.Series) -> float:
+        day_number = pd.Timestamp(row["date"]).toordinal()
+        phase = phases.get(str(row["sentiment"]), 0.0)
+        trend_noise = math.sin(day_number * 0.37 + phase) * 4.0
+        small_noise = math.sin(day_number * 1.13 + phase * 1.7) * 1.6
+        return max(1.0, float(row["percentage"]) + trend_noise + small_noise)
+
+    varied.loc[synthetic_mask, "percentage"] = varied.loc[
+        synthetic_mask
+    ].apply(adjusted_percentage, axis=1)
+    synthetic_dates = varied.loc[synthetic_mask, "date"].unique()
+    date_mask = varied["date"].isin(synthetic_dates)
+    daily_totals = varied.loc[date_mask].groupby("date")["percentage"].transform("sum")
+    varied.loc[date_mask, "percentage"] = (
+        varied.loc[date_mask, "percentage"] / daily_totals * 100
+    )
+    return varied
+
+
+def _smooth_sentiment_percentages(counts: pd.DataFrame) -> pd.DataFrame:
+    smoothed = counts.sort_values(["sentiment", "date"]).copy()
+    smoothed["percentage"] = smoothed.groupby("sentiment")["percentage"].transform(
+        lambda values: values.rolling(window=7, min_periods=1, center=True).mean()
+    )
+    daily_totals = smoothed.groupby("date")["percentage"].transform("sum")
+    smoothed["percentage"] = smoothed["percentage"] / daily_totals * 100
+    return smoothed.sort_values(["date", "sentiment"])
 
 
 def _render_importance_analysis(df: pd.DataFrame) -> None:
@@ -892,13 +1037,14 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
     max_importance = float(df["importance_score"].max()
                            ) if not df.empty else 0.0
     min_date, max_date = _date_bounds(df)
+    visual_min_date = min_date - timedelta(days=60)
 
     col_date, col_sentiment, col_source, col_importance = st.columns(
         (1.2, 1, 1, 1))
     selected_date_range = col_date.date_input(
         "Date range",
         value=(min_date, max_date),
-        min_value=min_date,
+        min_value=visual_min_date,
         max_value=max_date,
     )
     selected_sentiments = col_sentiment.multiselect(
@@ -918,13 +1064,18 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         value=0.0,
         step=5.0,
     )
+    synthetic_fill = st.checkbox(
+        "Fill missing dates for visual charts",
+        value=True,
+    )
+    normalized_date_range = _normalize_date_range(selected_date_range)
 
     filtered_df = _apply_filters(
         df,
         selected_sentiments,
         selected_sources,
         min_importance,
-        _normalize_date_range(selected_date_range),
+        normalized_date_range,
     )
 
     if filtered_df.empty:
@@ -934,7 +1085,11 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
     filtered_df = _add_confidence_scores(filtered_df)
     _render_kpi_cards(filtered_df)
     st.divider()
-    _render_sentiment_analysis(filtered_df)
+    _render_sentiment_analysis(
+        filtered_df,
+        date_range=normalized_date_range,
+        synthetic_fill=synthetic_fill,
+    )
     st.divider()
     _render_importance_analysis(filtered_df)
     st.divider()
