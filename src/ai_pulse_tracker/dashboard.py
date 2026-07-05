@@ -48,6 +48,14 @@ SENTIMENT_LABELS = {
     "neutral": "Neutral",
     "negative": "Negative",
 }
+DONUT_COLORS = [
+    "#0891B2",
+    "#7C3AED",
+    "#2563EB",
+    "#DB2777",
+    "#14B8A6",
+    "#94A3B8",
+]
 
 
 @st.cache_resource(show_spinner=False)
@@ -996,22 +1004,27 @@ def _render_sources_companies(df: pd.DataFrame) -> None:
         if source_df.empty:
             st.info("No source data available yet.")
         else:
+            source_donut_df = _donut_breakdown_dataframe(
+                source_df, "Source", "articles")
             st.plotly_chart(
-                px.bar(
-                    source_df.head(10),
-                    x="articles",
-                    y="Source",
-                    orientation="h",
-                    color="Avg importance",
-                    color_continuous_scale="Blues",
+                px.pie(
+                    source_donut_df,
+                    names="Source",
+                    values="articles",
+                    hole=0.58,
+                    color_discrete_sequence=DONUT_COLORS,
                 ).update_layout(
-                    yaxis={"categoryorder": "total ascending"},
-                    xaxis_title="Articles",
-                    yaxis_title="Source",
+                    showlegend=False,
+                    margin={"l": 16, "r": 16, "t": 8, "b": 8},
+                    height=360,
+                ).update_traces(
+                    textinfo="label+percent",
+                    textposition="outside",
+                    marker={"line": {"color": "white", "width": 2}},
+                    hovertemplate="%{label}<br>Articles: %{value}<br>%{percent}<extra></extra>",
                 ),
                 use_container_width=True,
             )
-            st.dataframe(source_df, use_container_width=True, hide_index=True)
 
     company_df = _company_strategy_dataframe(df)
     with company_col:
@@ -1019,22 +1032,27 @@ def _render_sources_companies(df: pd.DataFrame) -> None:
         if company_df.empty:
             st.info("No tracked company mentions detected yet.")
         else:
+            company_donut_df = _donut_breakdown_dataframe(
+                company_df, "Company", "Articles")
             st.plotly_chart(
-                px.bar(
-                    company_df.head(10),
-                    x="Articles",
-                    y="Company",
-                    orientation="h",
-                    color="Avg importance",
-                    color_continuous_scale="Purples",
+                px.pie(
+                    company_donut_df,
+                    names="Company",
+                    values="Articles",
+                    hole=0.58,
+                    color_discrete_sequence=DONUT_COLORS,
                 ).update_layout(
-                    yaxis={"categoryorder": "total ascending"},
-                    xaxis_title="Articles",
-                    yaxis_title="Company",
+                    showlegend=False,
+                    margin={"l": 16, "r": 16, "t": 8, "b": 8},
+                    height=360,
+                ).update_traces(
+                    textinfo="label+percent",
+                    textposition="outside",
+                    marker={"line": {"color": "white", "width": 2}},
+                    hovertemplate="%{label}<br>Articles: %{value}<br>%{percent}<extra></extra>",
                 ),
                 use_container_width=True,
             )
-            st.dataframe(company_df, use_container_width=True, hide_index=True)
 
 
 def _source_strategy_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -1060,6 +1078,32 @@ def _source_strategy_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             "Avg importance": source_df["avg_importance"].round(1),
         }
     )
+
+
+def _donut_breakdown_dataframe(
+    df: pd.DataFrame,
+    label_column: str,
+    value_column: str,
+    limit: int = 5,
+) -> pd.DataFrame:
+    chart_df = df[[label_column, value_column]].copy()
+    chart_df[value_column] = pd.to_numeric(
+        chart_df[value_column], errors="coerce").fillna(0)
+    chart_df = chart_df[chart_df[value_column] > 0].sort_values(
+        value_column, ascending=False
+    )
+    if len(chart_df) <= limit:
+        return chart_df
+
+    top_df = chart_df.head(limit).copy()
+    other_value = chart_df.iloc[limit:][value_column].sum()
+    if other_value <= 0:
+        return top_df
+
+    other_df = pd.DataFrame(
+        [{label_column: "Other", value_column: other_value}]
+    )
+    return pd.concat([top_df, other_df], ignore_index=True)
 
 
 def _company_mentions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
