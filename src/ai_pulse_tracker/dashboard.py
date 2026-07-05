@@ -1243,7 +1243,64 @@ def _render_articles(df: pd.DataFrame) -> None:
             "Summary": df["summary"].fillna("").astype(str),
         }
     )
-    st.dataframe(explorer_df, use_container_width=True, hide_index=True)
+    styled_explorer = explorer_df.style.apply(_style_article_explorer_row, axis=1)
+    table_height = min(760, max(260, 78 + len(explorer_df) * 42))
+    st.dataframe(
+        styled_explorer,
+        use_container_width=True,
+        hide_index=True,
+        height=table_height,
+        column_config={
+            "Date": st.column_config.TextColumn("Date", width="small"),
+            "Title": st.column_config.TextColumn("Title", width="large"),
+            "Source": st.column_config.TextColumn("Source", width="small"),
+            "Topic": st.column_config.TextColumn("Topic", width="small"),
+            "Sentiment": st.column_config.TextColumn("Sentiment", width="small"),
+            "Sentiment score": st.column_config.NumberColumn(
+                "Sentiment score",
+                format="%.2f",
+                width="small",
+            ),
+            "Importance score": st.column_config.ProgressColumn(
+                "Importance score",
+                min_value=0,
+                max_value=100,
+                format="%.1f",
+                width="medium",
+            ),
+            "URL": st.column_config.LinkColumn(
+                "Article",
+                display_text="Open",
+                width="small",
+            ),
+            "Summary": st.column_config.TextColumn("Summary", width="large"),
+        },
+    )
+
+
+def _style_article_explorer_row(row: pd.Series) -> list[str]:
+    sentiment = str(row.get("Sentiment", "")).lower()
+    sentiment_style = {
+        "positive": "background-color:#E9F9EF;color:#166534;font-weight:800;",
+        "neutral": "background-color:#FFF4E6;color:#9A3412;font-weight:800;",
+        "negative": "background-color:#FEECEC;color:#991B1B;font-weight:800;",
+    }.get(sentiment, "background-color:#F8FAFC;color:#475569;font-weight:700;")
+
+    styles: list[str] = []
+    for column in row.index:
+        if column == "Sentiment":
+            styles.append(sentiment_style)
+        elif column == "Title":
+            styles.append("font-weight:800;color:#111827;")
+        elif column == "Source":
+            styles.append("color:#0891B2;font-weight:700;")
+        elif column == "Topic":
+            styles.append("color:#7C3AED;font-weight:700;")
+        elif column == "Summary":
+            styles.append("color:#475569;")
+        else:
+            styles.append("")
+    return styles
 
 
 def _render_dashboard_header(df: pd.DataFrame) -> None:
