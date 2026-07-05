@@ -754,46 +754,66 @@ def _render_importance_analysis(df: pd.DataFrame) -> None:
 
     top_col, distribution_col = st.columns((1.4, 1))
     with top_col:
-        st.markdown("**Importance moyenne dans le temps**")
-        daily_importance_df = _daily_importance_dataframe(df)
-        if daily_importance_df.empty:
-            st.info("Not enough dated importance data yet.")
+        st.markdown("**Importance moyenne dans le temps par compagnie**")
+        company_importance_df = _company_importance_trend_dataframe(df)
+        if company_importance_df.empty:
+            st.info("Not enough dated company importance data yet.")
         else:
+            importance_min = float(company_importance_df["avg_importance"].min())
+            importance_max = float(company_importance_df["avg_importance"].max())
+            importance_padding = max((importance_max - importance_min) * 0.12, 3.0)
+            importance_range = [
+                max(0.0, importance_min - importance_padding),
+                min(100.0, importance_max + importance_padding),
+            ]
             st.plotly_chart(
                 px.line(
-                    daily_importance_df,
+                    company_importance_df,
                     x="date",
                     y="avg_importance",
-                    hover_data={"articles": True, "avg_importance": ":.1f"},
+                    color="company",
+                    color_discrete_sequence=px.colors.qualitative.Set2,
+                    hover_data={
+                        "company": False,
+                        "articles": True,
+                        "avg_importance": ":.1f",
+                    },
                 ).update_traces(
-                    line={"color": "#0891B2", "width": 3, "shape": "spline"},
+                    line={"width": 3, "shape": "spline"},
                 ).update_layout(
                     xaxis_title="Date",
                     yaxis_title="Average importance",
-                    yaxis={"range": [0, 100]},
-                    showlegend=False,
+                    yaxis={"range": importance_range},
+                    legend_title_text="Company",
                 ),
                 use_container_width=True,
             )
 
     with distribution_col:
         st.markdown("**Importance score distribution**")
-        distribution_df = _importance_distribution_dataframe(df)
-        st.plotly_chart(
-            px.bar(
-                distribution_df,
-                x="bucket",
-                y="articles",
-                text="articles",
-                color="bucket",
-                color_discrete_sequence=px.colors.sequential.Blues[2:],
-            ).update_layout(
-                xaxis_title="Importance score",
-                yaxis_title="Articles",
-                showlegend=False,
-            ),
-            use_container_width=True,
-        )
+        distribution_df = _company_importance_distribution_dataframe(df)
+        if distribution_df.empty:
+            st.info("No company importance distribution available yet.")
+        else:
+            st.plotly_chart(
+                px.bar(
+                    distribution_df,
+                    x="bucket",
+                    y="articles",
+                    color="company",
+                    category_orders={
+                        "bucket": ["0-20", "20-40", "40-60", "60-80", "80-100"]
+                    },
+                    color_discrete_sequence=px.colors.qualitative.Set2,
+                    hover_data={"company": True, "articles": True},
+                ).update_layout(
+                    barmode="stack",
+                    xaxis_title="Importance score",
+                    yaxis_title="Articles",
+                    legend_title_text="Company",
+                ),
+                use_container_width=True,
+            )
 
     st.markdown("**Top 5 articles importants**")
     _render_top_importance_article_cards(df)
@@ -896,19 +916,34 @@ def _top_importance_articles(df: pd.DataFrame) -> list[dict[str, str]]:
     return articles
 
 
-def _daily_importance_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    trend_df = df.copy()
-    trend_df["date"] = pd.to_datetime(
-        trend_df["date"], utc=True, errors="coerce")
-    trend_df["importance_score"] = pd.to_numeric(
-        trend_df["importance_score"], errors="coerce")
-    trend_df = trend_df.dropna(subset=["date", "importance_score"])
-    if trend_df.empty:
-        return pd.DataFrame(columns=["date", "avg_importance", "articles"])
+def _company_importance_trend_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    mentions = _company_mentions_dataframe(df)
+    if mentions.empty:
+        return pd.DataFrame(
+            columns=["date", "company", "avg_importance", "articles"]
+        )
 
-    trend_df["date"] = trend_df["date"].dt.date
+    mentions["date"] = pd.to_datetime(
+        mentions["date"], utc=True, errors="coerce")
+    mentions["importance_score"] = pd.to_numeric(
+        mentions["importance_score"], errors="coerce")
+    mentions = mentions.dropna(subset=["date", "importance_score"])
+    if mentions.empty:
+        return pd.DataFrame(
+            columns=["date", "company", "avg_importance", "articles"]
+        )
+
+    top_companies = (
+        mentions.groupby("company")["title"]
+        .count()
+        .sort_values(ascending=False)
+        .head(6)
+        .index.tolist()
+    )
+    mentions = mentions[mentions["company"].isin(top_companies)].copy()
+    mentions["date"] = mentions["date"].dt.date
     return (
-        trend_df.groupby("date", as_index=False)
+        mentions.groupby(["date", "company"], as_index=False)
         .agg(
             avg_importance=("importance_score", "mean"),
             articles=("title", "count"),
@@ -917,18 +952,38 @@ def _daily_importance_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _importance_distribution_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def _company_importance_distribution_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     buckets = ["0-20", "20-40", "40-60", "60-80", "80-100"]
-    scores = pd.to_numeric(df["importance_score"], errors="coerce").fillna(0.0)
-    bucket_series = pd.cut(
-        scores,
+    mentions = _company_mentions_dataframe(df)
+    if mentions.empty:
+        return pd.DataFrame(columns=["bucket", "company", "articles"])
+
+    mentions["importance_score"] = pd.to_numeric(
+        mentions["importance_score"], errors="coerce")
+    mentions = mentions.dropna(subset=["importance_score"])
+    if mentions.empty:
+        return pd.DataFrame(columns=["bucket", "company", "articles"])
+
+    top_companies = (
+        mentions.groupby("company")["title"]
+        .count()
+        .sort_values(ascending=False)
+        .head(6)
+        .index.tolist()
+    )
+    mentions = mentions[mentions["company"].isin(top_companies)].copy()
+    mentions["bucket"] = pd.cut(
+        mentions["importance_score"],
         bins=[0, 20, 40, 60, 80, 100],
         labels=buckets,
         include_lowest=True,
         right=True,
+    ).astype(str)
+    return (
+        mentions.groupby(["bucket", "company"], as_index=False)
+        .agg(articles=("title", "count"))
+        .sort_values(["bucket", "articles"], ascending=[True, False])
     )
-    counts = bucket_series.value_counts().reindex(buckets, fill_value=0)
-    return pd.DataFrame({"bucket": buckets, "articles": counts.astype(int).tolist()})
 
 
 def _render_sources_companies(df: pd.DataFrame) -> None:
@@ -1015,6 +1070,7 @@ def _company_mentions_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 {
                     "company": company,
                     "title": str(article.get("title", "")),
+                    "date": article.get("date"),
                     "sentiment": str(article.get("sentiment", "")).lower(),
                     "importance_score": float(article.get("importance_score", 0.0) or 0.0),
                 }
