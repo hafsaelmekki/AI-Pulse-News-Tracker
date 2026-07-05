@@ -56,6 +56,11 @@ DONUT_COLORS = [
     "#14B8A6",
     "#94A3B8",
 ]
+ASSISTANT_DEFAULT_SUGGESTIONS = [
+    "What are the strongest AI Pulse trends right now?",
+    "Which companies are most visible in AI Pulse?",
+    "What changed in AI Pulse sentiment over time?",
+]
 
 
 @st.cache_resource(show_spinner=False)
@@ -1213,6 +1218,9 @@ def _render_evidence(search_results: list[dict[str, object]]) -> None:
 
 def _render_ai_assistant(df: pd.DataFrame) -> None:
     st.subheader("AI Trend Assistant")
+    st.caption(
+        "Ask about dashboard trends, companies, sources, sentiment, important articles, or weak signals."
+    )
 
     if "agent_messages" not in st.session_state:
         st.session_state.agent_messages = []
@@ -1220,15 +1228,25 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
     if st.button("Clear chat", key="clear-agent-chat"):
         st.session_state.agent_messages = []
 
-    for message in st.session_state.agent_messages:
+    selected_prompt = None
+    for index, message in enumerate(st.session_state.agent_messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             _render_evidence(message.get("evidence", []))
+            if message.get("suggestions"):
+                selected_prompt = (
+                    _render_assistant_suggestions(
+                        message["suggestions"],
+                        f"assistant-message-{index}-suggestion",
+                    )
+                    or selected_prompt
+                )
 
-    prompt = st.chat_input(
+    typed_prompt = st.chat_input(
         "Ask about AI trends, companies, RAG, agents...",
         key="ai-agent-chat-input",
     )
+    prompt = selected_prompt or typed_prompt
     if not prompt:
         return
 
@@ -1242,12 +1260,14 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
             limit=5,
         )
         answer = answer_question(prompt, search_results)
+    suggestions = _assistant_suggestions_for_prompt(prompt)
 
     user_message = {"role": "user", "content": prompt}
     assistant_message = {
         "role": "assistant",
         "content": answer,
         "evidence": search_results,
+        "suggestions": suggestions,
     }
     st.session_state.agent_messages.extend([user_message, assistant_message])
 
@@ -1256,6 +1276,85 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
     with st.chat_message("assistant"):
         st.markdown(answer)
         _render_evidence(search_results)
+        if suggestions:
+            _render_assistant_suggestions(
+                suggestions,
+                f"assistant-live-suggestion-{len(st.session_state.agent_messages)}",
+            )
+
+
+def _render_assistant_suggestions(
+    suggestions: list[str],
+    key_prefix: str,
+) -> str | None:
+    st.markdown("**Suggested dashboard questions**")
+    selected_prompt = None
+    columns = st.columns(2)
+    for index, question in enumerate(suggestions):
+        column = columns[index % len(columns)]
+        with column:
+            if st.button(question, key=f"{key_prefix}-{index}", use_container_width=True):
+                selected_prompt = question
+    return selected_prompt
+
+
+def _assistant_suggestions_for_prompt(prompt: str) -> list[str]:
+    normalized = prompt.lower()
+    suggestion_groups = [
+        (
+            ("sentiment", "positive", "negative", "neutral"),
+            [
+                "What explains this AI Pulse sentiment trend?",
+                "Which AI Pulse sources drive this sentiment?",
+                "Which companies have the strongest sentiment shift?",
+            ],
+        ),
+        (
+            ("company", "companies", "openai", "google", "microsoft", "anthropic"),
+            [
+                "Which AI Pulse companies are gaining visibility?",
+                "Compare company sentiment in AI Pulse.",
+                "Which important articles mention these companies?",
+            ],
+        ),
+        (
+            ("source", "sources", "media", "publisher"),
+            [
+                "Which AI Pulse sources publish the most articles?",
+                "Which sources cover the highest-importance topics?",
+                "How does sentiment differ by source?",
+            ],
+        ),
+        (
+            ("importance", "important", "article", "articles"),
+            [
+                "Which AI Pulse articles are most important?",
+                "What topics appear in high-importance articles?",
+                "Which companies dominate important articles?",
+            ],
+        ),
+        (
+            ("signal", "signals", "weak", "signaux"),
+            [
+                "What weak signals should I watch in AI Pulse?",
+                "Which low-volume topics look important?",
+                "Which companies appear in weak signals?",
+            ],
+        ),
+        (
+            ("trend", "trends", "topic", "topics", "rag", "agent", "agents"),
+            [
+                "Which AI Pulse topics are trending fastest?",
+                "How are RAG and AI agents evolving?",
+                "Which companies are linked to these trends?",
+            ],
+        ),
+    ]
+
+    for keywords, suggestions in suggestion_groups:
+        if any(keyword in normalized for keyword in keywords):
+            return suggestions[:3]
+    return ASSISTANT_DEFAULT_SUGGESTIONS[:3]
 
 
 def _render_articles(df: pd.DataFrame) -> None:

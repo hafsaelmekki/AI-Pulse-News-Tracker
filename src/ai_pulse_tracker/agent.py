@@ -20,6 +20,8 @@ Pipeline:
 Cosmos DB articles -> retrieval -> structured article context -> LLM -> analytical answer with sources.
 
 Rules:
+- Stay strictly within AI Pulse dashboard data and retrieved AI Pulse articles.
+- If the user asks about an unrelated topic, politely say you can only analyze AI Pulse data.
 - Do not invent facts that are not present in the retrieved articles.
 - Mention uncertainty when the evidence is limited.
 - Use citations like [1], [2], [3] when referring to articles.
@@ -82,6 +84,12 @@ DATA_QUERY_TERMS = {
     "anthropic",
     "claude",
     "sentiment",
+    "signal",
+    "signals",
+    "signaux",
+    "dashboard",
+    "importance",
+    "important",
     "regulation",
     "automation",
     "automatisation",
@@ -107,18 +115,20 @@ def answer_conversation(question: str) -> str:
     if _asks_for_english(normalized):
         return (
             "Yes Hafsa, we can speak in English. "
-            "Ask me about AI trends, RAG, AI agents, companies, sources, "
-            "sentiment, or important signals from the collected articles."
+            "I stay focused on AI Pulse only: dashboard trends, RAG, AI agents, "
+            "companies, sources, sentiment, important articles, and weak signals."
         )
     if not normalized or first_word in CONVERSATION_STARTERS:
         return (
             "Hey Hafsa. Je suis ton assistant AI Pulse. "
-            "Tu peux me demander les tendances IA, les sujets RAG, agents IA, "
-            "entreprises citees, sources importantes ou signaux faibles."
+            "Je peux analyser les tendances IA, les companies, les sources, "
+            "le sentiment, l'importance des articles et les signaux faibles du dashboard. "
+            "Choisis une question ci-dessous ou pose ta propre question."
         )
     return (
-        "Oui Hafsa, je suis la. Pose-moi une question sur les tendances IA "
-        "ou sur les articles collectes dans AI Pulse."
+        "Je peux uniquement rester dans le périmètre AI Pulse. "
+        "Pose-moi une question sur les tendances, sentiment, sources, companies, "
+        "articles importants ou signaux faibles du dashboard."
     )
 
 
@@ -136,11 +146,15 @@ def answer_question(question: str, retrieved_articles: list[Mapping[str, Any]]) 
 
     article_context = _article_context(retrieved_articles)
     messages = build_llm_messages(question, article_context)
-    llm_answer = _try_generate_with_llm(messages)
-    if llm_answer:
-        return _ensure_source_appendix(llm_answer, retrieved_articles)
+    try:
+        llm_answer = _try_generate_with_llm(messages)
+    except RuntimeError as exc:
+        return (
+            "LLM is required for assistant answers, but it is not available. "
+            f"{exc}"
+        )
 
-    return _professional_fallback_answer(question, retrieved_articles)
+    return _ensure_source_appendix(llm_answer, retrieved_articles)
 
 
 def build_llm_messages(
@@ -187,10 +201,12 @@ def build_llm_messages(
     ]
 
 
-def _try_generate_with_llm(messages: list[dict[str, str]]) -> str | None:
+def _try_generate_with_llm(messages: list[dict[str, str]]) -> str:
     api_key = os.getenv("AI_PULSE_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        return None
+        raise RuntimeError(
+            "Set AI_PULSE_LLM_API_KEY or OPENAI_API_KEY to enable the assistant."
+        )
 
     endpoint = os.getenv(
         "AI_PULSE_LLM_ENDPOINT",
@@ -215,11 +231,15 @@ def _try_generate_with_llm(messages: list[dict[str, str]]) -> str | None:
         response.raise_for_status()
         payload = response.json()
         answer = payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, ValueError, requests.RequestException):
-        return None
+    except requests.RequestException as exc:
+        raise RuntimeError(f"LLM request failed: {exc}") from exc
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError("LLM response format was invalid.") from exc
 
     answer = str(answer).strip()
-    return answer or None
+    if not answer:
+        raise RuntimeError("LLM returned an empty answer.")
+    return answer
 
 
 def _article_context(retrieved_articles: list[Mapping[str, Any]]) -> list[dict[str, Any]]:

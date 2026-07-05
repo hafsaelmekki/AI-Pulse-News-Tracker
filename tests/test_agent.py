@@ -33,22 +33,16 @@ def _results() -> list[dict]:
     ]
 
 
-def test_answer_question_uses_professional_grounded_format(monkeypatch):
+def test_answer_question_requires_llm_when_missing(monkeypatch):
     monkeypatch.delenv("AI_PULSE_LLM_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     answer = answer_question("What are the AI trends?", _results())
 
-    assert "### Executive answer" in answer
-    assert "### Key insights" in answer
-    assert "### Evidence" in answer
-    assert "Answer based on" not in answer
-    assert "Main signals" not in answer
-    assert "[1]" in answer
-    assert "[2]" in answer
-    assert "Tech News" in answer
-    assert "Importance: 86.0" in answer
-    assert "https://example.com/agents" in answer
+    assert "LLM is required for assistant answers" in answer
+    assert "AI_PULSE_LLM_API_KEY" in answer
+    assert "OPENAI_API_KEY" in answer
+    assert "### Executive answer" not in answer
 
 
 def test_answer_question_handles_empty_results():
