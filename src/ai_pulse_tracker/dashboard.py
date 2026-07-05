@@ -10,11 +10,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from .agent import (
     answer_conversation,
     answer_dashboard_question,
+    detect_assistant_language,
     detect_dashboard_intent,
+    detect_language_change_request,
     is_conversation_prompt,
 )
 from .config import load_settings
@@ -24,7 +27,14 @@ from .relevance import ai_relevance_reason
 from .retrieval import search_articles
 from .trends import count_keywords, normalize_keywords
 
-st.set_page_config(page_title="AI Pulse Tracker", layout="wide")
+APP_PAGE_TITLE = "AI Pulse - Azure Sentiment Monitor"
+
+st.set_page_config(
+    page_title=APP_PAGE_TITLE,
+    page_icon="📊",
+    layout="wide",
+    menu_items={"About": APP_PAGE_TITLE},
+)
 PIPELINE_RESOURCE_KEY = "pipeline-v2"
 TRACKED_TOPICS = {
     "AI Agents": ("ai agent", "ai agents", "agentic", "agents", "agent"),
@@ -69,6 +79,14 @@ ASSISTANT_DEFAULT_SUGGESTIONS = [
     "Which companies are most visible in AI Pulse?",
     "What changed in AI Pulse sentiment over time?",
 ]
+ASSISTANT_DEFAULT_SUGGESTIONS_BY_LANGUAGE = {
+    "en": ASSISTANT_DEFAULT_SUGGESTIONS,
+    "fr": [
+        "Quelles sont les tendances AI Pulse les plus fortes ?",
+        "Quelles companies sont les plus visibles dans AI Pulse ?",
+        "Comment évolue le sentiment AI Pulse dans le temps ?",
+    ],
+}
 CONTEXT_TEXT_LIMIT = 220
 CONTEXT_SENTIMENT_DAYS = 14
 
@@ -294,11 +312,24 @@ def _add_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 def _render_project_menu() -> str:
     st.sidebar.header("Project Menu")
-    return st.sidebar.radio(
-        "Sections",
-        ["Dashboard", "Assistant"],
-        key="project-section",
-    )
+    if "project-section" not in st.session_state:
+        st.session_state["project-section"] = "Dashboard"
+
+    for section in ("Dashboard", "Assistant"):
+        is_active = st.session_state["project-section"] == section
+        st.sidebar.button(
+            section,
+            key=f"project-menu-{section.lower()}",
+            type="primary" if is_active else "secondary",
+            use_container_width=True,
+            on_click=_set_project_section,
+            args=(section,),
+        )
+    return str(st.session_state["project-section"])
+
+
+def _set_project_section(section: str) -> None:
+    st.session_state["project-section"] = section
 
 
 def _render_kpi_cards(df: pd.DataFrame) -> None:
@@ -1461,32 +1492,68 @@ def _normalize_prompt(prompt: str) -> str:
     )
 
 
-def _question_for_follow_up(intent: str, prompt: str) -> str:
-    base_questions = {
-        "trends": "What are the strongest AI Pulse trends?",
-        "sentiment": "What changed in AI Pulse sentiment over time?",
-        "companies": "Which companies are most mentioned in AI Pulse?",
-        "sources": "Which sources are most active in AI Pulse?",
-        "importance": "Which AI Pulse articles are most important?",
-        "weak_signals": "What weak signals should I watch in AI Pulse?",
-        "general_summary": "What happened in AI Pulse?",
+def _question_for_follow_up(intent: str, prompt: str, language: str = "en") -> str:
+    base_questions_by_language = {
+        "en": {
+            "trends": "What are the strongest AI Pulse trends?",
+            "sentiment": "What changed in AI Pulse sentiment over time?",
+            "companies": "Which companies are most mentioned in AI Pulse?",
+            "sources": "Which sources are most active in AI Pulse?",
+            "importance": "Which AI Pulse articles are most important?",
+            "weak_signals": "What weak signals should I watch in AI Pulse?",
+            "general_summary": "What happened in AI Pulse?",
+        },
+        "fr": {
+            "trends": "Quelles sont les tendances AI Pulse les plus fortes ?",
+            "sentiment": "Comment le sentiment AI Pulse a-t-il évolué ?",
+            "companies": "Quelles companies sont les plus mentionnées dans AI Pulse ?",
+            "sources": "Quelles sources sont les plus actives dans AI Pulse ?",
+            "importance": "Quels articles AI Pulse sont les plus importants ?",
+            "weak_signals": "Quels signaux faibles faut-il surveiller dans AI Pulse ?",
+            "general_summary": "Que s’est-il passé dans AI Pulse ?",
+        },
     }
+    base_questions = base_questions_by_language.get(language, base_questions_by_language["en"])
     return f"{base_questions.get(intent, base_questions['general_summary'])} {prompt}"
 
 
-def _render_ai_assistant(df: pd.DataFrame) -> None:
-    st.subheader("AI Trend Assistant")
-    st.caption(
-        "Ask about dashboard trends, companies, sources, sentiment, important articles, or weak signals."
+def _set_browser_title(title: str) -> None:
+    components.html(
+        f"<script>window.parent.document.title = {json.dumps(title)};</script>",
+        height=0,
+        width=0,
     )
 
+
+def _render_ai_assistant(df: pd.DataFrame) -> None:
     if "agent_messages" not in st.session_state:
         st.session_state.agent_messages = []
     if "assistant_answer_cache" not in st.session_state:
         st.session_state.assistant_answer_cache = {}
+    if "assistant_language" not in st.session_state:
+        st.session_state.assistant_language = None
+
+    current_language = str(st.session_state.get("assistant_language") or "en")
+    _set_browser_title(
+        "Assistant AI Pulse" if current_language == "fr" else "AI Pulse Assistant"
+    )
+    st.subheader("Assistant AI Pulse" if current_language == "fr" else "AI Pulse Assistant")
+    st.caption(
+        (
+            "Pose une question sur les tendances du dashboard, companies, sources, "
+            "sentiment, articles importants ou signaux faibles."
+        )
+        if current_language == "fr"
+        else (
+            "Ask about dashboard trends, companies, sources, sentiment, "
+            "important articles, or weak signals."
+        )
+    )
 
     if st.button("Clear chat", key="clear-agent-chat"):
         st.session_state.agent_messages = []
+        st.session_state.assistant_language = None
+        st.session_state["assistant_last_intent"] = None
 
     selected_prompt = None
     for index, message in enumerate(st.session_state.agent_messages):
@@ -1494,34 +1561,53 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
             st.markdown(message["content"])
             _render_evidence(message.get("evidence", []))
             if message.get("suggestions"):
+                message_language = str(
+                    message.get("language") or st.session_state.get("assistant_language") or "en"
+                )
                 selected_prompt = (
                     _render_assistant_suggestions(
                         message["suggestions"],
                         f"assistant-message-{index}-suggestion",
+                        language=message_language,
                     )
                     or selected_prompt
                 )
 
     typed_prompt = st.chat_input(
-        "Ask about AI trends, companies, RAG, agents...",
+        (
+            "Pose une question sur les tendances IA, companies, RAG, agents..."
+            if current_language == "fr"
+            else "Ask about AI trends, companies, RAG, agents..."
+        ),
         key="ai-agent-chat-input",
     )
     prompt = selected_prompt or typed_prompt
     if not prompt:
         return
 
+    requested_language = detect_language_change_request(prompt)
+    if requested_language:
+        st.session_state.assistant_language = requested_language
+    elif not st.session_state.get("assistant_language"):
+        st.session_state.assistant_language = detect_assistant_language(prompt)
+    assistant_language = str(st.session_state.get("assistant_language") or "en")
+
     detected_intent = detect_dashboard_intent(prompt)
     last_intent = st.session_state.get("assistant_last_intent")
     if detected_intent == "follow_up":
         effective_intent = str(last_intent or "general_summary")
-        effective_question = _question_for_follow_up(effective_intent, prompt)
+        effective_question = _question_for_follow_up(
+            effective_intent,
+            prompt,
+            language=assistant_language,
+        )
     else:
         effective_intent = detected_intent
         effective_question = prompt
 
     if detected_intent != "follow_up" and is_conversation_prompt(prompt):
         search_results = []
-        answer = answer_conversation(prompt)
+        answer = answer_conversation(prompt, language=assistant_language)
     else:
         scoped_df, temporal_label = _filter_assistant_dataframe_by_time(
             df,
@@ -1539,6 +1625,7 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
             effective_question,
             effective_intent,
             dashboard_context,
+            assistant_language,
         )
         cached_answer = st.session_state.assistant_answer_cache.get(cache_key)
         if cached_answer:
@@ -1549,10 +1636,14 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
                 dashboard_context,
                 search_results,
                 intent=effective_intent,
+                language=assistant_language,
             )
             st.session_state.assistant_answer_cache[cache_key] = answer
         st.session_state["assistant_last_intent"] = effective_intent
-    suggestions = _assistant_suggestions_for_prompt(effective_question)
+    suggestions = _assistant_suggestions_for_prompt(
+        effective_question,
+        language=assistant_language,
+    )
 
     user_message = {"role": "user", "content": prompt}
     assistant_message = {
@@ -1560,6 +1651,7 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
         "content": answer,
         "evidence": search_results,
         "suggestions": suggestions,
+        "language": assistant_language,
     }
     st.session_state.agent_messages.extend([user_message, assistant_message])
 
@@ -1572,6 +1664,7 @@ def _render_ai_assistant(df: pd.DataFrame) -> None:
             _render_assistant_suggestions(
                 suggestions,
                 f"assistant-live-suggestion-{len(st.session_state.agent_messages)}",
+                language=assistant_language,
             )
 
 
@@ -1579,11 +1672,13 @@ def _assistant_answer_cache_key(
     question: str,
     intent: str,
     dashboard_context: dict[str, object],
+    language: str,
 ) -> str:
     payload = json.dumps(
         {
             "question": question,
             "intent": intent,
+            "language": language,
             "dashboard_context": dashboard_context,
         },
         ensure_ascii=False,
@@ -1596,8 +1691,10 @@ def _assistant_answer_cache_key(
 def _render_assistant_suggestions(
     suggestions: list[str],
     key_prefix: str,
+    language: str = "en",
 ) -> str | None:
-    st.markdown("**Suggested dashboard questions**")
+    label = "Questions dashboard suggérées" if language == "fr" else "Suggested dashboard questions"
+    st.markdown(f"**{label}**")
     selected_prompt = None
     columns = st.columns(2)
     for index, question in enumerate(suggestions):
@@ -1608,63 +1705,122 @@ def _render_assistant_suggestions(
     return selected_prompt
 
 
-def _assistant_suggestions_for_prompt(prompt: str) -> list[str]:
+def _assistant_suggestions_for_prompt(prompt: str, language: str = "en") -> list[str]:
     normalized = prompt.lower()
-    suggestion_groups = [
-        (
-            ("sentiment", "positive", "negative", "neutral"),
-            [
-                "What explains this AI Pulse sentiment trend?",
-                "Which AI Pulse sources drive this sentiment?",
-                "Which companies have the strongest sentiment shift?",
-            ],
-        ),
-        (
-            ("company", "companies", "openai", "google", "microsoft", "anthropic"),
-            [
-                "Which AI Pulse companies are gaining visibility?",
-                "Compare company sentiment in AI Pulse.",
-                "Which important articles mention these companies?",
-            ],
-        ),
-        (
-            ("source", "sources", "media", "publisher"),
-            [
-                "Which AI Pulse sources publish the most articles?",
-                "Which sources cover the highest-importance topics?",
-                "How does sentiment differ by source?",
-            ],
-        ),
-        (
-            ("importance", "important", "article", "articles"),
-            [
-                "Which AI Pulse articles are most important?",
-                "What topics appear in high-importance articles?",
-                "Which companies dominate important articles?",
-            ],
-        ),
-        (
-            ("signal", "signals", "weak", "signaux"),
-            [
-                "What weak signals should I watch in AI Pulse?",
-                "Which low-volume topics look important?",
-                "Which companies appear in weak signals?",
-            ],
-        ),
-        (
-            ("trend", "trends", "topic", "topics", "rag", "agent", "agents"),
-            [
-                "Which AI Pulse topics are trending fastest?",
-                "How are RAG and AI agents evolving?",
-                "Which companies are linked to these trends?",
-            ],
-        ),
-    ]
+    suggestion_groups_by_language = {
+        "en": [
+            (
+                ("sentiment", "positive", "negative", "neutral", "positif", "negatif"),
+                [
+                    "What explains this AI Pulse sentiment trend?",
+                    "Which AI Pulse sources drive this sentiment?",
+                    "Which companies have the strongest sentiment shift?",
+                ],
+            ),
+            (
+                ("company", "companies", "entreprise", "entreprises", "openai", "google", "microsoft", "anthropic"),
+                [
+                    "Which AI Pulse companies are gaining visibility?",
+                    "Compare company sentiment in AI Pulse.",
+                    "Which important articles mention these companies?",
+                ],
+            ),
+            (
+                ("source", "sources", "media", "publisher"),
+                [
+                    "Which AI Pulse sources publish the most articles?",
+                    "Which sources cover the highest-importance topics?",
+                    "How does sentiment differ by source?",
+                ],
+            ),
+            (
+                ("importance", "important", "article", "articles"),
+                [
+                    "Which AI Pulse articles are most important?",
+                    "What topics appear in high-importance articles?",
+                    "Which companies dominate important articles?",
+                ],
+            ),
+            (
+                ("signal", "signals", "weak", "signaux", "faibles"),
+                [
+                    "What weak signals should I watch in AI Pulse?",
+                    "Which low-volume topics look important?",
+                    "Which companies appear in weak signals?",
+                ],
+            ),
+            (
+                ("trend", "trends", "tendance", "tendances", "topic", "topics", "rag", "agent", "agents"),
+                [
+                    "Which AI Pulse topics are trending fastest?",
+                    "How are RAG and AI agents evolving?",
+                    "Which companies are linked to these trends?",
+                ],
+            ),
+        ],
+        "fr": [
+            (
+                ("sentiment", "positive", "negative", "neutral", "positif", "negatif"),
+                [
+                    "Qu’est-ce qui explique cette tendance de sentiment AI Pulse ?",
+                    "Quelles sources AI Pulse influencent ce sentiment ?",
+                    "Quelles companies ont le plus fort changement de sentiment ?",
+                ],
+            ),
+            (
+                ("company", "companies", "entreprise", "entreprises", "openai", "google", "microsoft", "anthropic"),
+                [
+                    "Quelles companies gagnent en visibilité dans AI Pulse ?",
+                    "Compare le sentiment des companies dans AI Pulse.",
+                    "Quels articles importants mentionnent ces companies ?",
+                ],
+            ),
+            (
+                ("source", "sources", "media", "publisher"),
+                [
+                    "Quelles sources AI Pulse publient le plus d’articles ?",
+                    "Quelles sources couvrent les sujets les plus importants ?",
+                    "Comment le sentiment varie-t-il par source ?",
+                ],
+            ),
+            (
+                ("importance", "important", "article", "articles"),
+                [
+                    "Quels articles AI Pulse sont les plus importants ?",
+                    "Quels topics apparaissent dans les articles à forte importance ?",
+                    "Quelles companies dominent les articles importants ?",
+                ],
+            ),
+            (
+                ("signal", "signals", "weak", "signaux", "faibles"),
+                [
+                    "Quels signaux faibles dois-je surveiller dans AI Pulse ?",
+                    "Quels topics peu visibles semblent importants ?",
+                    "Quelles companies apparaissent dans les signaux faibles ?",
+                ],
+            ),
+            (
+                ("trend", "trends", "tendance", "tendances", "topic", "topics", "rag", "agent", "agents"),
+                [
+                    "Quels topics AI Pulse progressent le plus vite ?",
+                    "Comment évoluent RAG et les agents IA ?",
+                    "Quelles companies sont liées à ces tendances ?",
+                ],
+            ),
+        ],
+    }
+    suggestion_groups = suggestion_groups_by_language.get(
+        language,
+        suggestion_groups_by_language["en"],
+    )
 
     for keywords, suggestions in suggestion_groups:
         if any(keyword in normalized for keyword in keywords):
             return suggestions[:3]
-    return ASSISTANT_DEFAULT_SUGGESTIONS[:3]
+    return ASSISTANT_DEFAULT_SUGGESTIONS_BY_LANGUAGE.get(
+        language,
+        ASSISTANT_DEFAULT_SUGGESTIONS_BY_LANGUAGE["en"],
+    )[:3]
 
 
 def _render_articles(df: pd.DataFrame) -> None:
@@ -1907,6 +2063,11 @@ def render_dashboard() -> None:
     st.caption("Latest French-language AI coverage scored via Azure AI Language")
 
     selected_section = _render_project_menu()
+    _set_browser_title(
+        "AI Pulse Dashboard"
+        if selected_section == "Dashboard"
+        else "AI Pulse Assistant"
+    )
 
     df = load_dataframe()
 

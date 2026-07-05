@@ -5,12 +5,15 @@ from ai_pulse_tracker.agent import (
     MAX_LLM_PAYLOAD_KB,
     _payload_size_kb,
     _protected_dashboard_payload,
+    answer_conversation,
     answer_dashboard_question,
     answer_important_articles_by_company,
     answer_question,
     build_dashboard_llm_messages,
     build_llm_messages,
+    detect_assistant_language,
     detect_dashboard_intent,
+    detect_language_change_request,
     is_conversation_prompt,
 )
 
@@ -124,6 +127,24 @@ def test_answer_question_does_not_search_language_switch_prompt():
     assert "strongest signals" not in answer
 
 
+def test_assistant_language_detection_and_switch_requests():
+    assert detect_assistant_language("bonjour") == "fr"
+    assert detect_assistant_language("je veux voir les tendances") == "fr"
+    assert detect_assistant_language("show companies") == "en"
+    assert detect_assistant_language("show me companies") == "en"
+    assert detect_language_change_request("réponds en anglais") == "en"
+    assert detect_language_change_request("switch to French") == "fr"
+    assert detect_language_change_request("show companies") is None
+
+
+def test_answer_conversation_uses_locked_language():
+    english_answer = answer_conversation("bonjour", language="en")
+    french_answer = answer_conversation("hello", language="fr")
+
+    assert "I am your AI Pulse assistant" in english_answer
+    assert "Je suis ton assistant AI Pulse" in french_answer
+
+
 def test_build_llm_messages_contains_article_context():
     messages = build_llm_messages("What are the AI trends?", _results())
 
@@ -178,6 +199,19 @@ def test_build_dashboard_llm_messages_contains_dashboard_context():
     assert "Retrieved article evidence" in messages[1]["content"]
 
 
+def test_build_dashboard_llm_messages_uses_locked_language():
+    messages = build_dashboard_llm_messages(
+        "What changed in sentiment?",
+        {"total_articles": 2},
+        [],
+        intent="sentiment",
+        language="fr",
+    )
+
+    assert "Answer language: French" in messages[1]["content"]
+    assert "Write the entire answer in French" in messages[1]["content"]
+
+
 def test_answer_dashboard_question_uses_deterministic_company_answer(monkeypatch):
     monkeypatch.delenv("AI_PULSE_LLM_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -218,6 +252,18 @@ def test_simple_dashboard_intents_do_not_call_llm(monkeypatch):
         )
         assert expected_text in answer
         assert "LLM is required" not in answer
+
+
+def test_deterministic_dashboard_answer_uses_locked_language():
+    answer = answer_dashboard_question(
+        "Which sources are most active?",
+        _dashboard_context(),
+        [],
+        intent="sources",
+        language="fr",
+    )
+
+    assert "Les sources AI Pulse" in answer
 
 
 def test_answer_important_articles_by_company_matches_top_companies():

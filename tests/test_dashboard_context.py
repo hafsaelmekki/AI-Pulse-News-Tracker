@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 
 from ai_pulse_tracker.dashboard import (
+    _assistant_suggestions_for_prompt,
+    _question_for_follow_up,
     build_compact_dashboard_context,
     build_dashboard_context,
 )
@@ -61,3 +63,19 @@ def test_build_compact_dashboard_context_limits_articles_and_text():
     assert len(context["top_important_articles"][0]["title"]) <= 220
     assert len(context["top_important_articles"][0]["summary"]) <= 220
     assert len({record["date"][:10] for record in context["sentiment_by_day"]}) == 14
+
+
+def test_assistant_suggestions_follow_locked_language():
+    french_suggestions = _assistant_suggestions_for_prompt(
+        "Which companies are most mentioned?",
+        language="fr",
+    )
+    english_suggestions = _assistant_suggestions_for_prompt(
+        "Quelles companies sont les plus mentionnées ?",
+        language="en",
+    )
+    french_follow_up = _question_for_follow_up("sources", "hier", language="fr")
+
+    assert french_suggestions[0].startswith("Quelles companies")
+    assert english_suggestions[0].startswith("Which AI Pulse companies")
+    assert french_follow_up.startswith("Quelles sources")

@@ -33,7 +33,7 @@ Rules:
 - Do not simply list article titles.
 - Give analytical insights.
 - Mention relevant numbers from the dashboard.
-- Answer in the same language as the user.
+- Answer in the configured assistant language from the prompt.
 - Never confuse sentiment label with importance_score.
 """.strip()
 
@@ -161,26 +161,108 @@ def detect_dashboard_intent(question: str) -> str:
     return "general_summary"
 
 
-def answer_conversation(question: str) -> str:
+def detect_assistant_language(question: str) -> str:
+    return _answer_language(question)
+
+
+def detect_language_change_request(question: str) -> str | None:
+    normalized = _normalize_question(question)
+    english_phrases = {
+        "english",
+        "in english",
+        "speak english",
+        "speak in english",
+        "switch to english",
+        "change to english",
+        "answer in english",
+        "reply in english",
+        "anglais",
+        "en anglais",
+        "parle anglais",
+        "parler anglais",
+        "repond en anglais",
+        "répond en anglais",
+        "reponds en anglais",
+        "réponds en anglais",
+    }
+    french_phrases = {
+        "french",
+        "in french",
+        "speak french",
+        "speak in french",
+        "switch to french",
+        "change to french",
+        "answer in french",
+        "reply in french",
+        "francais",
+        "français",
+        "en francais",
+        "en français",
+        "parle francais",
+        "parle français",
+        "parler francais",
+        "parler français",
+        "repond en francais",
+        "repond en français",
+        "répond en francais",
+        "répond en français",
+        "reponds en francais",
+        "reponds en français",
+        "réponds en francais",
+        "réponds en français",
+    }
+    if any(phrase in normalized for phrase in english_phrases):
+        return "en"
+    if any(phrase in normalized for phrase in french_phrases):
+        return "fr"
+    return None
+
+
+def answer_conversation(question: str, language: str | None = None) -> str:
     normalized = question.strip().lower()
     first_word = normalized.replace(",", " ").replace("!", " ").split(maxsplit=1)[0]
-    if _asks_for_english(normalized):
+    target_language = language or detect_language_change_request(question) or _answer_language(question)
+    requested_language = detect_language_change_request(question)
+    if requested_language == "en":
         return (
             "Yes Hafsa, we can speak in English. "
             "I stay focused on AI Pulse only: dashboard trends, RAG, AI agents, "
             "companies, sources, sentiment, important articles, and weak signals."
         )
-    if not normalized or first_word in CONVERSATION_STARTERS:
+    if requested_language == "fr":
         return (
-            "Hey Hafsa. Je suis ton assistant AI Pulse. "
-            "Je peux analyser les tendances IA, les companies, les sources, "
-            "le sentiment, l'importance des articles et les signaux faibles du dashboard. "
-            "Choisis une question ci-dessous ou pose ta propre question."
+            "Oui Hafsa, on peut parler en français. "
+            "Je reste concentré uniquement sur AI Pulse : tendances du dashboard, RAG, "
+            "agents IA, companies, sources, sentiment, articles importants et signaux faibles."
         )
-    return (
-        "Je peux uniquement rester dans le périmètre AI Pulse. "
-        "Pose-moi une question sur les tendances, sentiment, sources, companies, "
-        "articles importants ou signaux faibles du dashboard."
+    if not normalized or first_word in CONVERSATION_STARTERS:
+        return _localized(
+            target_language,
+            (
+                "Hey Hafsa. I am your AI Pulse assistant. "
+                "I can analyze AI trends, companies, sources, sentiment, "
+                "article importance, and dashboard weak signals. "
+                "Choose a question below or ask your own."
+            ),
+            (
+                "Hey Hafsa. Je suis ton assistant AI Pulse. "
+                "Je peux analyser les tendances IA, les companies, les sources, "
+                "le sentiment, l'importance des articles et les signaux faibles du dashboard. "
+                "Choisis une question ci-dessous ou pose ta propre question."
+            ),
+        )
+    return _localized(
+        target_language,
+        (
+            "I can only stay within the AI Pulse scope. "
+            "Ask me about dashboard trends, sentiment, sources, companies, "
+            "important articles, or weak signals."
+        ),
+        (
+            "Je peux uniquement rester dans le périmètre AI Pulse. "
+            "Pose-moi une question sur les tendances, sentiment, sources, companies, "
+            "articles importants ou signaux faibles du dashboard."
+        ),
     )
 
 
@@ -215,11 +297,13 @@ def answer_dashboard_question(
     retrieved_articles: list[Mapping[str, Any]],
     *,
     intent: str,
+    language: str | None = None,
 ) -> str:
     deterministic_answer = _deterministic_dashboard_answer(
         question,
         dashboard_context,
         intent=intent,
+        language=language,
     )
     if deterministic_answer:
         return deterministic_answer
@@ -229,6 +313,7 @@ def answer_dashboard_question(
         dashboard_context,
         _article_context(retrieved_articles),
         intent=intent,
+        language=language,
     )
     try:
         llm_answer = _try_generate_with_llm(messages)
@@ -238,6 +323,7 @@ def answer_dashboard_question(
             dashboard_context,
             intent=intent,
             error=str(exc),
+            language=language,
         )
     return _ensure_source_appendix(llm_answer, retrieved_articles)
 
@@ -303,6 +389,7 @@ def build_dashboard_llm_messages(
     article_context: list[Mapping[str, Any]],
     *,
     intent: str,
+    language: str | None = None,
 ) -> list[dict[str, str]]:
     payload = _protected_dashboard_payload(
         question=question,
@@ -310,6 +397,8 @@ def build_dashboard_llm_messages(
         article_context=article_context,
         intent=intent,
     )
+    target_language = language or _answer_language(question)
+    language_name = "French" if target_language == "fr" else "English"
     context_json = json.dumps(
         payload["dashboard_context"],
         ensure_ascii=False,
@@ -325,6 +414,7 @@ def build_dashboard_llm_messages(
     user_prompt = "\n".join(
         [
             f"Dashboard intent: {intent}",
+            f"Answer language: {language_name}",
             f"Payload size: {payload['payload_size_kb']:.1f} KB",
             "",
             "dashboard_context:",
@@ -337,7 +427,8 @@ def build_dashboard_llm_messages(
             "",
             (
                 "Answer as an AI Pulse dashboard analyst. Start from dashboard_context "
-                "numbers, then use retrieved evidence only to illustrate the analysis."
+                "numbers, then use retrieved evidence only to illustrate the analysis. "
+                f"Write the entire answer in {language_name}."
             ),
         ]
     )
@@ -352,8 +443,9 @@ def _deterministic_dashboard_answer(
     dashboard_context: Mapping[str, Any],
     *,
     intent: str,
+    language: str | None = None,
 ) -> str | None:
-    language = _answer_language(question)
+    language = language or _answer_language(question)
     normalized = _normalize_question(question)
     if _asks_important_articles_by_company(normalized):
         return answer_important_articles_by_company(dashboard_context, language=language)
@@ -374,12 +466,14 @@ def _fallback_dashboard_answer(
     *,
     intent: str,
     error: str,
+    language: str | None = None,
 ) -> str:
-    language = _answer_language(question)
+    language = language or _answer_language(question)
     deterministic = _deterministic_dashboard_answer(
         question,
         dashboard_context,
         intent=intent,
+        language=language,
     )
     if deterministic:
         return deterministic
@@ -635,19 +729,50 @@ def _localized(language: str, english: str, french: str) -> str:
 
 def _answer_language(question: str) -> str:
     normalized = _normalize_question(question)
-    french_markers = {
+    french_words = {
+        "je",
+        "tu",
+        "moi",
+        "nous",
+        "veux",
+        "peux",
+        "peut",
+        "pourquoi",
+        "comment",
+        "dans",
+        "avec",
+        "sans",
+        "les",
+        "des",
+        "une",
+        "sur",
+        "ce",
+        "ça",
+        "ca",
+        "ajoute",
+        "enleve",
+        "enlève",
+        "bonjour",
+        "bonsoir",
+        "salut",
+        "coucou",
+    }
+    french_phrases = {
         "quels",
         "quelle",
         "quelles",
         "entreprise",
         "entreprises",
+        "tendance",
+        "tendances",
         "signaux",
         "faibles",
         "aujourd'hui",
         "hier",
         "semaine",
     }
-    if any(marker in normalized for marker in french_markers):
+    words = set(normalized.replace("?", " ").replace(",", " ").replace(".", " ").split())
+    if words & french_words or any(marker in normalized for marker in french_phrases):
         return "fr"
     return "en"
 
