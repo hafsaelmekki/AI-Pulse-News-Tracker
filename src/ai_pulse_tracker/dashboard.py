@@ -11,7 +11,7 @@ from .config import load_settings
 from .models import UpsertResult
 from .pipeline import NewsAnalyzerPipeline
 from .retrieval import search_articles
-from .trends import count_keywords, format_keywords, normalize_keywords
+from .trends import count_keywords, normalize_keywords
 
 st.set_page_config(page_title="AI Pulse Tracker", layout="wide")
 PIPELINE_RESOURCE_KEY = "pipeline-v2"
@@ -91,10 +91,8 @@ def _apply_filters(
     df: pd.DataFrame,
     sentiments: list[str],
     sources: list[str],
-    topics: list[str],
     min_importance: float,
     date_range: tuple[object, object] | None,
-    search_text: str,
 ) -> pd.DataFrame:
     filtered = df.copy()
     filtered["date_dt"] = pd.to_datetime(
@@ -114,27 +112,6 @@ def _apply_filters(
         filtered = filtered[filtered["source"].isin(sources)]
 
     filtered = filtered[filtered["importance_score"] >= min_importance]
-
-    if topics:
-        mask = filtered["topics"].apply(
-            lambda values: any(topic in values for topic in topics)
-        )
-        filtered = filtered[mask]
-
-    search_text = search_text.strip().lower()
-    if search_text:
-        searchable = (
-            filtered["title"].fillna("").astype(str).str.lower()
-            + " "
-            + filtered["summary"].fillna("").astype(str).str.lower()
-            + " "
-            + filtered["description"].fillna("").astype(str).str.lower()
-            + " "
-            + filtered["keyword_text"].fillna("").astype(str).str.lower()
-            + " "
-            + filtered["source"].fillna("").astype(str).str.lower()
-        )
-        filtered = filtered[searchable.str.contains(search_text, regex=False)]
 
     return filtered.drop(columns=["date_dt"])
 
@@ -167,7 +144,6 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         prepared["importance_score"],
         errors="coerce",
     ).fillna(0.0)
-    prepared["keyword_text"] = prepared["keywords"].apply(format_keywords)
     prepared["topics"] = prepared.apply(_detect_topics, axis=1)
     prepared["topic"] = prepared["topics"].apply(
         lambda topics: topics[0] if topics else "Uncategorized"
@@ -250,16 +226,6 @@ def _render_project_menu() -> str:
         ["Dashboard", "Assistant"],
         key="project-section",
     )
-
-
-def _render_overview(df: pd.DataFrame) -> None:
-    sentiment_counts = df["sentiment"].value_counts()
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Analyzed Articles", int(len(df)))
-    col2.metric("Dominant Sentiment", sentiment_counts.idxmax().capitalize())
-    col3.metric("Unique Sources", int(df["source"].nunique()))
-    col4.metric("Avg Importance", f"{df['importance_score'].mean():.1f}")
 
 
 def _render_kpi_cards(df: pd.DataFrame) -> None:
@@ -915,25 +881,14 @@ def _normalize_date_range(value: object) -> tuple[object, object] | None:
     return None
 
 
-def _available_topics(df: pd.DataFrame) -> list[str]:
-    topics: set[str] = set()
-    for values in df["topics"]:
-        if isinstance(values, list):
-            topics.update(str(value) for value in values if str(value).strip())
-    return sorted(topics)
-
-
 def _render_dashboard_view(df: pd.DataFrame) -> None:
     _render_dashboard_header(df)
-    _render_kpi_cards(df)
-    st.divider()
 
     st.subheader("Global Filters")
     sentiments_available = sorted(df["sentiment"].dropna().unique().tolist())
     sources_available = sorted(df["source"].fillna(
         "").astype(str).unique().tolist())
     sources_available = [source for source in sources_available if source]
-    topics_available = _available_topics(df)
     max_importance = float(df["importance_score"].max()
                            ) if not df.empty else 0.0
     min_date, max_date = _date_bounds(df)
@@ -964,25 +919,12 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         step=5.0,
     )
 
-    col_topic, col_search = st.columns((1.2, 1.8))
-    selected_topics = col_topic.multiselect(
-        "Topic",
-        topics_available,
-        default=[],
-    )
-    search_text = col_search.text_input(
-        "Keyword search",
-        placeholder="OpenAI, benchmark, cost optimization...",
-    )
-
     filtered_df = _apply_filters(
         df,
         selected_sentiments,
         selected_sources,
-        selected_topics,
         min_importance,
         _normalize_date_range(selected_date_range),
-        search_text,
     )
 
     if filtered_df.empty:
@@ -990,7 +932,7 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         return
 
     filtered_df = _add_confidence_scores(filtered_df)
-    _render_overview(filtered_df)
+    _render_kpi_cards(filtered_df)
     st.divider()
     _render_sentiment_analysis(filtered_df)
     st.divider()
