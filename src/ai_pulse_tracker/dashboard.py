@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import html
 import math
 
 import pandas as pd
@@ -239,23 +240,78 @@ def _render_kpi_cards(df: pd.DataFrame) -> None:
     sentiment_label, sentiment_delta = _average_sentiment(df)
     positive_pct = _sentiment_percentage(df, "positive")
     negative_pct = _sentiment_percentage(df, "negative")
-    top_article = _top_article_label(df)
     top_source = _top_value(df, "source")
     dominant_topic = _dominant_topic(df)
 
     first_row = st.columns(4)
-    first_row[0].metric("Total articles", int(len(df)))
-    first_row[1].metric("Articles today", today_count)
-    first_row[2].metric("Articles this week", week_count)
-    first_row[3].metric("Average sentiment", sentiment_label, sentiment_delta)
+    _render_kpi_card(first_row[0], "Total articles", int(len(df)), "#2563EB")
+    _render_kpi_card(first_row[1], "Articles today", today_count, "#0891B2")
+    _render_kpi_card(first_row[2], "Articles this week", week_count, "#7C3AED")
+    _render_kpi_card(
+        first_row[3],
+        "Average sentiment",
+        sentiment_label,
+        "#16A34A" if sentiment_label == "Positive" else "#F97316",
+        sentiment_delta,
+    )
 
     second_row = st.columns(4)
-    second_row[0].metric("Positive articles", f"{positive_pct:.0f}%")
-    second_row[1].metric("Negative articles", f"{negative_pct:.0f}%")
-    second_row[2].metric("Most active source", top_source)
-    second_row[3].metric("Dominant topic", dominant_topic)
+    _render_kpi_card(
+        second_row[0],
+        "Positive articles",
+        f"{positive_pct:.0f}%",
+        "#22C55E",
+    )
+    _render_kpi_card(
+        second_row[1],
+        "Negative articles",
+        f"{negative_pct:.0f}%",
+        "#EF4444",
+    )
+    _render_kpi_card(second_row[2], "Most active source", top_source, "#F59E0B")
+    _render_kpi_card(second_row[3], "Dominant topic", dominant_topic, "#DB2777")
 
-    st.metric("Most important article", top_article)
+
+def _render_kpi_card(
+    container: object,
+    label: str,
+    value: object,
+    color: str,
+    delta: str | None = None,
+) -> None:
+    delta_html = ""
+    if delta:
+        delta_html = (
+            "<div style='font-size:0.82rem;font-weight:700;opacity:0.86;'>"
+            f"{html.escape(delta)}"
+            "</div>"
+        )
+    container.markdown(
+        (
+            "<div style='"
+            f"background:{color};"
+            "color:white;"
+            "border-radius:8px;"
+            "padding:14px 16px;"
+            "min-height:94px;"
+            "box-shadow:0 8px 22px rgba(15,23,42,0.12);"
+            "display:flex;"
+            "flex-direction:column;"
+            "justify-content:space-between;"
+            "'>"
+            "<div style='font-size:0.78rem;font-weight:700;text-transform:uppercase;"
+            "letter-spacing:0;opacity:0.82;'>"
+            f"{html.escape(label)}"
+            "</div>"
+            "<div style='font-size:1.6rem;font-weight:800;line-height:1.15;"
+            "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>"
+            f"{html.escape(str(value))}"
+            "</div>"
+            f"{delta_html}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _average_sentiment(df: pd.DataFrame) -> tuple[str, str]:
@@ -285,15 +341,6 @@ def _sentiment_percentage(df: pd.DataFrame, sentiment: str) -> float:
         return 0.0
     sentiments = df["sentiment"].fillna("").astype(str).str.lower()
     return float(sentiments.eq(sentiment).mean() * 100)
-
-
-def _top_article_label(df: pd.DataFrame) -> str:
-    if df.empty:
-        return "N/A"
-    article = df.sort_values("importance_score", ascending=False).iloc[0]
-    title = str(article.get("title", "")).strip() or "Untitled article"
-    score = float(article.get("importance_score", 0.0) or 0.0)
-    return f"{_shorten_text(title, 80)} ({score:.1f})"
 
 
 def _top_value(df: pd.DataFrame, column: str) -> str:
