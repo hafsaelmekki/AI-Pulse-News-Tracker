@@ -383,10 +383,17 @@ def _render_trends(df: pd.DataFrame) -> None:
                     y="topic",
                     orientation="h",
                     text="articles",
+                    color="articles",
+                    color_continuous_scale=["#D9F3F7", "#0891B2", "#064E63"],
                 ).update_layout(
                     yaxis={"categoryorder": "total ascending"},
                     xaxis_title="Articles",
                     yaxis_title="Topic",
+                    coloraxis_showscale=False,
+                    showlegend=False,
+                ).update_traces(
+                    cliponaxis=False,
+                    textposition="outside",
                 ),
                 use_container_width=True,
             )
