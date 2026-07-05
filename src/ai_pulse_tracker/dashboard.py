@@ -1084,7 +1084,6 @@ def _quick_date_range(
 def _render_dashboard_view(df: pd.DataFrame) -> None:
     _render_dashboard_header(df)
 
-    st.subheader("Global Filters")
     sentiments_available = sorted(df["sentiment"].dropna().unique().tolist())
     sources_available = sorted(df["source"].fillna(
         "").astype(str).unique().tolist())
@@ -1101,15 +1100,13 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         list(_date_filter_options()),
         index=1,
     )
-    selected_sentiments = col_sentiment.multiselect(
+    sentiment_filter = col_sentiment.selectbox(
         "Sentiment",
-        sentiments_available,
-        default=sentiments_available,
+        ["All sentiments", "Select sentiments"],
     )
-    selected_sources = col_source.multiselect(
+    source_filter = col_source.selectbox(
         "Source",
-        sources_available,
-        default=sources_available,
+        ["All sources", "Select sources"],
     )
     min_importance = col_importance.slider(
         "Min importance",
@@ -1128,6 +1125,24 @@ def _render_dashboard_view(df: pd.DataFrame) -> None:
         normalized_date_range = _normalize_date_range(selected_date_range)
     else:
         normalized_date_range = _quick_date_range(selected_date_filter, max_date)
+
+    if source_filter == "Select sources":
+        selected_sources = st.multiselect(
+            "Selected sources",
+            sources_available,
+            default=[],
+        )
+    else:
+        selected_sources = []
+
+    if sentiment_filter == "Select sentiments":
+        selected_sentiments = st.multiselect(
+            "Selected sentiments",
+            sentiments_available,
+            default=[],
+        )
+    else:
+        selected_sentiments = []
 
     synthetic_fill = st.checkbox(
         "Fill missing dates for visual charts",
