@@ -70,6 +70,37 @@ def load_dataframe() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _run_dashboard_update(last_update: datetime | None) -> None:
+    after = last_update
+    if after is None:
+        after = datetime.now(timezone.utc) - timedelta(days=30)
+
+    try:
+        with st.spinner("Checking for new articles..."):
+            result = _ensure_upsert_result(
+                get_pipeline(PIPELINE_RESOURCE_KEY).run(
+                    after=after, incremental=False
+                )
+            )
+    except Exception as exc:
+        st.error(f"Update failed: {exc}")
+        return
+
+    load_dataframe.clear()
+    if result.created or result.updated:
+        st.session_state["dashboard_update_message"] = (
+            "success",
+            f"Update complete: {result.created} new articles, "
+            f"{result.updated} updated.",
+        )
+    else:
+        st.session_state["dashboard_update_message"] = (
+            "info",
+            "No new articles found.",
+        )
+    st.rerun()
+
+
 def _ensure_upsert_result(result: UpsertResult | list[str]) -> UpsertResult:
     if isinstance(result, UpsertResult):
         return result
@@ -1306,11 +1337,35 @@ def _style_article_explorer_row(row: pd.Series) -> list[str]:
 def _render_dashboard_header(df: pd.DataFrame) -> None:
     date_series = pd.to_datetime(
         df["date"], utc=True, errors="coerce").dropna()
+    caption_col, update_col = st.columns([1, 0.12])
     if date_series.empty:
-        st.caption("Last update: unknown")
+        with caption_col:
+            st.caption("Last update: unknown")
+        with update_col:
+            if st.button("Update", key="dashboard-update-button", type="primary"):
+                _run_dashboard_update(None)
+        _render_dashboard_update_message()
         return
-    last_update = date_series.max().strftime("%Y-%m-%d %H:%M UTC")
-    st.caption(f"Last update: {last_update}")
+    last_update_dt = date_series.max().to_pydatetime()
+    last_update = last_update_dt.strftime("%Y-%m-%d %H:%M UTC")
+    with caption_col:
+        st.caption(f"Last update: {last_update}")
+    with update_col:
+        if st.button("Update", key="dashboard-update-button", type="primary"):
+            _run_dashboard_update(last_update_dt)
+    _render_dashboard_update_message()
+
+
+def _render_dashboard_update_message() -> None:
+    message = st.session_state.pop("dashboard_update_message", None)
+    if not message:
+        return
+
+    message_type, message_text = message
+    if message_type == "success":
+        st.success(message_text)
+    else:
+        st.info(message_text)
 
 
 def _date_bounds(df: pd.DataFrame) -> tuple[object, object]:
