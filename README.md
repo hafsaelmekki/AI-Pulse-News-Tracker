@@ -1,72 +1,96 @@
-# AI Pulse News Tracker
+# AI Pulse - Azure Sentiment Monitor
 
-AI Pulse News Tracker collecte des articles récents sur l'intelligence artificielle, analyse leur sentiment avec Azure AI Language, les stocke dans Azure Cosmos DB, puis les affiche dans un tableau de bord Streamlit.
+AI Pulse is a Streamlit dashboard and RAG assistant for monitoring AI news signals.
+It ingests articles from NewsAPI, enriches them with Azure AI Language sentiment,
+stores the results in Azure Cosmos DB, and exposes analytical views for trends,
+companies, sources, sentiment, importance and weak signals.
 
-Le projet sert à suivre rapidement les tendances de l'actualité IA, en particulier les articles francophones, avec une lecture synthétique des volumes, sources et sentiments.
+The assistant combines:
 
-## Aperçu
+- compact dashboard metrics;
+- retrieved article evidence;
+- LLM-generated synthesis with citations;
+- deterministic dashboard fallback when the LLM provider is unavailable.
 
-- Collecte d'articles via NewsAPI.
-- Analyse de sentiment via Azure AI Language.
-- Stockage des résultats enrichis dans Azure Cosmos DB.
-- Tableau de bord Streamlit avec indicateurs, graphiques et filtres.
-- Mode ponctuel ou suivi continu avec intervalle configurable.
+## Features
 
-## Fonctionnalités
+- News ingestion from NewsAPI with incremental cursor support.
+- Azure AI Language sentiment analysis.
+- AI relevance filtering to keep the dataset focused on AI / Generative AI.
+- Keyword, topic, company and importance enrichment.
+- Cosmos DB persistence with deduplication.
+- Streamlit dashboard with KPIs, filters and visual analytics.
+- RAG-style assistant using `dashboard_context` + retrieved articles.
+- Groq/OpenAI-compatible LLM endpoint support through environment variables.
+- Deterministic assistant fallback for rate limits or missing LLM credentials.
 
-- Ingestion incrémentale des nouveaux articles pour éviter les doublons.
-- Première exécution avec historique automatique sur les 30 derniers jours.
-- Déduplication par URL dans Cosmos DB.
-- Filtres par période, sentiment et mots-clés dans le dashboard.
-- Commandes CLI pour relancer une collecte complète ou depuis une date précise.
-
-## Architecture
+## Repository Layout
 
 ```text
 .
-|-- app.py                 # Point d'entrée du dashboard Streamlit
-|-- news_analyzer.py       # CLI pour lancer l'ingestion
+|-- app.py                         # Streamlit entrypoint
+|-- news_analyzer.py               # Ingestion CLI
+|-- requirements.txt               # Runtime dependencies
+|-- pyproject.toml                 # Package metadata and dev dependencies
+|-- .env.example                   # Environment variable template
+|-- .streamlit/
+|   |-- config.toml                # Streamlit theme
+|-- docs/
+|   |-- AI_PRODUCT_ROADMAP.md      # Product roadmap
+|-- scripts/
+|   |-- check_setup.py             # Optional local API connectivity check
 |-- src/
 |   |-- ai_pulse_tracker/
-|       |-- config.py      # Chargement et validation de la configuration
-|       |-- dashboard.py   # Interface Streamlit
-|       |-- models.py      # Modèles de données
-|       |-- news.py        # Client NewsAPI
-|       |-- pipeline.py    # Orchestration collecte/analyse/stockage
-|       |-- sentiment.py   # Client Azure AI Language
-|       |-- storage.py     # Accès Azure Cosmos DB
-|-- tests/                 # Tests pytest
-|-- .env.example           # Modèle de configuration
-|-- pyproject.toml         # Packaging et dépendances
-|-- requirements.txt       # Dépendances runtime
+|       |-- agent.py               # RAG assistant and LLM/fallback logic
+|       |-- config.py              # Settings loader
+|       |-- dashboard.py           # Streamlit dashboard UI
+|       |-- embeddings.py          # Local deterministic embeddings
+|       |-- enrichment.py          # Keyword/topic/company enrichment
+|       |-- models.py              # Domain models
+|       |-- news.py                # NewsAPI client
+|       |-- pipeline.py            # Ingestion orchestration
+|       |-- relevance.py           # AI relevance filtering
+|       |-- retrieval.py           # Hybrid article retrieval
+|       |-- sentiment.py           # Azure AI Language client
+|       |-- storage.py             # Cosmos DB repository
+|       |-- trends.py              # Keyword utilities
+|-- tests/                         # Pytest suite
 ```
 
-## Prérequis
+## Requirements
 
-- Python 3.10 ou plus récent.
-- Une clé NewsAPI.
-- Un service Azure AI Language.
-- Un compte Azure Cosmos DB avec l'API Core SQL.
+- Python 3.10+
+- NewsAPI key
+- Azure AI Language resource
+- Azure Cosmos DB account using Core SQL API
+- Optional: OpenAI-compatible LLM provider for assistant synthesis
 
 ## Installation
 
 ```bash
-git clone <url-du-repo>
+git clone <repo-url>
 cd AI-Pulse-News-Tracker
 python -m venv venv
 venv\Scripts\activate
-pip install -e .[dev]
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+For development and tests:
+
+```bash
+python -m pip install -e ".[dev]"
 ```
 
 ## Configuration
 
-Copier le fichier d'exemple :
+Create a local `.env` file from the template:
 
 ```bash
 copy .env.example .env
 ```
 
-Puis remplir les variables dans `.env` :
+Required variables:
 
 ```env
 AZURE_AI_ENDPOINT=https://<your-ai-endpoint>.cognitiveservices.azure.com/
@@ -76,77 +100,130 @@ COSMOS_ENDPOINT=https://<your-account>.documents.azure.com:443/
 COSMOS_KEY=
 COSMOS_DATABASE=NewsDatabase
 COSMOS_CONTAINER=Analyses
-NEWS_QUERY=Generative AI
+NEWS_QUERY=("Generative AI" OR ChatGPT OR OpenAI OR LLM OR "AI agents" OR RAG OR Gemini OR Copilot OR Mistral)
 NEWS_LANGUAGE=fr
-NEWS_BATCH_SIZE=5
+NEWS_BATCH_SIZE=50
+NEWS_MAX_LOOKBACK_DAYS=29
 ```
 
-Ne jamais publier le fichier `.env` sur GitHub. Le dépôt doit seulement contenir `.env.example`.
+Optional LLM variables:
 
-## Utilisation
+```env
+AI_PULSE_LLM_API_KEY=
+AI_PULSE_LLM_MODEL=gpt-4o-mini
+AI_PULSE_LLM_ENDPOINT=https://api.openai.com/v1/chat/completions
+```
 
-Lancer une collecte ponctuelle :
+For Groq or another OpenAI-compatible provider, set:
+
+```env
+AI_PULSE_LLM_ENDPOINT=https://api.groq.com/openai/v1/chat/completions
+AI_PULSE_LLM_MODEL=<groq-model-name>
+AI_PULSE_LLM_API_KEY=<provider-api-key>
+```
+
+Never commit `.env` or local key files.
+
+## Run Ingestion
+
+Run one ingestion pass:
 
 ```bash
 python news_analyzer.py
 ```
 
-Utiliser une requête spécifique :
+Override the query:
 
 ```bash
 python news_analyzer.py --query "Generative AI"
 ```
 
-Relancer une collecte depuis une date :
+Fetch articles from a specific date:
 
 ```bash
 python news_analyzer.py --since 2024-04-01T00:00:00Z
 ```
 
-Ignorer le curseur incrémental et récupérer le dernier lot :
+Force a refresh without the incremental cursor:
 
 ```bash
 python news_analyzer.py --full-refresh
 ```
 
-Lancer un suivi continu toutes les deux minutes :
+Run continuously:
 
 ```bash
 python news_analyzer.py --interval 120
 ```
 
-## Dashboard
-
-Lancer l'interface Streamlit :
+## Run Dashboard
 
 ```bash
 streamlit run app.py
 ```
 
-Le dashboard permet de :
+The dashboard includes:
 
-- visualiser le nombre d'articles analysés ;
-- identifier le sentiment dominant ;
-- comparer les sources ;
-- filtrer par période, sentiment et mots-clés ;
-- déclencher une nouvelle ingestion depuis la barre latérale.
+- global filters by date, sentiment, source and importance;
+- KPI cards;
+- sentiment distribution and sentiment trend;
+- importance analysis by company;
+- topic and keyword trends;
+- source and company donut charts;
+- styled article explorer;
+- AI Pulse Assistant for RAG-style analysis.
+
+## Assistant Behavior
+
+The assistant uses a hybrid context:
+
+```text
+user question
+-> intent detection
+-> compact dashboard_context
+-> article retrieval
+-> compact retrieved_evidence
+-> LLM synthesis
+-> cited analytical answer
+```
+
+It does not send the full dataframe or full article contents to the LLM.
+Retrieved evidence is compact and capped to a small article set.
+
+If the LLM is unavailable, rate-limited or not configured, the assistant returns a deterministic dashboard-based fallback instead of crashing.
+
+## Utility Scripts
+
+Check local API configuration and NewsAPI connectivity:
+
+```bash
+python scripts/check_setup.py
+```
+
+This script uses your local `.env` and should not be part of automated tests.
 
 ## Tests
 
 ```bash
-pytest
+python -m pytest tests
 ```
+
+The test suite covers:
+
+- configuration loading;
+- ingestion and NewsAPI query behavior;
+- enrichment, relevance and embeddings;
+- retrieval scoring;
+- dashboard context building;
+- assistant LLM payload protection and fallback behavior.
+
+## Security
+
+- Keep API keys in `.env`.
+- Keep `.env`, local key files, virtual environments and caches out of Git.
+- Use `.env.example` only to document expected variables.
+- Do not paste secrets into issues, commits or screenshots.
 
 ## Roadmap
 
-- Ajouter plus de sources d'actualité.
-- Ajouter des alertes email ou Discord.
-- Ajouter un résumé automatique des articles.
-- Ajouter un export CSV ou JSON depuis le dashboard.
-- Déployer le dashboard sur Streamlit Community Cloud ou Azure.
-
-## Sécurité
-
-- Garder les clés API dans `.env`.
-- Vérifier que `.env` est bien ignoré par Git.
-- Utiliser `.env.example` uniquement pour documenter les variables attendues.
+See `docs/AI_PRODUCT_ROADMAP.md`.

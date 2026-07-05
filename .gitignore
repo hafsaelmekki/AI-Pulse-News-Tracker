@@ -7,7 +7,12 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *.log
+build/
+dist/
+.coverage
+htmlcov/
 .pytest_cache/
+.tmp/
 .mypy_cache/
 .streamlit/*
 !.streamlit/config.toml

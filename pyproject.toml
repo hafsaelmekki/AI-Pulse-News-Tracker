@@ -5,19 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ai-pulse-tracker"
 version = "0.1.0"
-description = "NewsAPI ingestion + Azure sentiment dashboard"
+description = "AI news ingestion, Azure sentiment analytics and RAG dashboard assistant"
 readme = "README.md"
 authors = [{name = "AI Pulse"}]
 requires-python = ">=3.10"
 dependencies = [
-    "azure-ai-textanalytics",
-    "azure-core",
-    "azure-cosmos",
-    "pandas",
-    "plotly",
-    "python-dotenv",
-    "requests",
-    "streamlit",
+    "azure-ai-textanalytics>=5.3",
+    "azure-core>=1.30",
+    "azure-cosmos>=4.5",
+    "pandas>=2.2",
+    "plotly>=5.20",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "streamlit>=1.36",
 ]
 
 [project.optional-dependencies]
