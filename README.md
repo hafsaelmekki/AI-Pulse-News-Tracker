@@ -30,6 +30,9 @@ The assistant combines:
 .
 |-- app.py                         # Streamlit entrypoint
 |-- news_analyzer.py               # Ingestion CLI
+|-- Dockerfile                     # Container image for dashboard/ingestion
+|-- docker-compose.yml             # Local Docker orchestration
+|-- .dockerignore                  # Docker build exclusions
 |-- requirements.txt               # Runtime dependencies
 |-- pyproject.toml                 # Package metadata and dev dependencies
 |-- .env.example                   # Environment variable template
@@ -172,6 +175,53 @@ The dashboard includes:
 - source and company donut charts;
 - styled article explorer;
 - AI Pulse Assistant for RAG-style analysis.
+
+## Docker
+
+Docker runs the Streamlit dashboard with the same `.env` configuration used locally.
+Cloud services such as NewsAPI, Azure AI Language and Cosmos DB stay external.
+
+Build the image:
+
+```bash
+docker build -t ai-pulse-tracker .
+```
+
+Run the dashboard:
+
+```bash
+docker run --env-file .env -p 8501:8501 ai-pulse-tracker
+```
+
+Open:
+
+```text
+http://localhost:8501
+```
+
+Using Docker Compose:
+
+```bash
+docker compose up --build dashboard
+```
+
+Run one ingestion pass through Docker Compose:
+
+```bash
+docker compose run --rm ingest
+```
+
+Run ingestion with custom CLI options:
+
+```bash
+docker compose run --rm ingest python news_analyzer.py --query "Generative AI" --full-refresh
+```
+
+Notes:
+
+- `.env` is loaded at runtime through `env_file`; it is not copied into the image.
+- `.dockerignore` excludes secrets, virtual environments, caches, tests and docs from the build context.
+- The dashboard container exposes port `8501`.
 
 ## Assistant Behavior
 

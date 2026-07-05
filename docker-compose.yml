@@ -1,0 +1,21 @@
+services:
+  dashboard:
+    build:
+      context: .
+    image: ai-pulse-tracker:latest
+    container_name: ai-pulse-dashboard
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+  ingest:
+    build:
+      context: .
+    image: ai-pulse-tracker:latest
+    env_file:
+      - .env
+    command: ["python", "news_analyzer.py"]
+    profiles:
+      - ingest
